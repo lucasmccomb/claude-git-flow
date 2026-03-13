@@ -140,11 +140,11 @@ gh pr merge --squash --delete-branch    # Merge
 
 ## How It Works
 
-The system has four layers:
+The system has four layers, each building on the last:
 
 ### Layer 1: CLAUDE.md (soft rules)
 
-Instructions the agent reads and follows. Covers conventions like "rebase by default", "check open PRs before branching", "no AI attribution in commits".
+Instructions the agent reads and follows voluntarily. Covers conventions like "rebase by default", "check open PRs before branching", "no AI attribution in commits". Useful but not enforced - the agent can still ignore them.
 
 ### Layer 2: enforce-git-workflow.py (hard enforcement)
 
@@ -160,9 +160,21 @@ Protected branches: `main`, `master`, `production`, `prod`, `staging`, `stag`, `
 
 Emergency bypass: `ALLOW_MAIN_COMMIT=1 git commit ...`
 
-### Layer 3: enforce-issue-workflow.py (context injection)
+### Layer 3: enforce-issue-workflow.py (the automation multiplier)
 
-A `UserPromptSubmit` hook that detects work requests (verbs like "add", "fix", "implement") and injects a reminder: "STOP - create an issue first."
+**This is where the real value is.** A `UserPromptSubmit` hook that fires before the agent even starts working. It detects work requests (verbs like "add", "fix", "implement", "build") and injects a workflow reminder directly into the agent's context:
+
+```
+STOP - Before making ANY code or file changes, you MUST:
+1. CHECK: Does a GitHub issue exist for this work?
+2. CREATE BRANCH: git checkout -b {issue-number}-{description}
+3. IMPLEMENT: Make your changes
+4. COMMIT & PR: git commit -m "{issue-number}: {description}"
+```
+
+**Why this matters**: Layers 1 and 2 catch mistakes *after* the agent tries to do something wrong. Layer 3 prevents them from happening in the first place by reshaping the agent's behavior *before it writes a single line of code*. Every work request, no matter how casually phrased ("fix the login bug", "add dark mode"), gets intercepted and turned into a structured workflow. The agent creates the issue, names the branch, implements, and follows through to PR - automatically, every time.
+
+This is what makes the system work across multiple engineers. You don't need to train anyone on the workflow or review their process. The hook does it. Every agent, every session, every task follows the same flow.
 
 Only active when `~/.claude/github-repo-protocols.md` exists. Delete that file to disable.
 
