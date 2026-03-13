@@ -48,14 +48,14 @@ bash setup.sh
 ```
 
 The script will:
-1. Show the default protected branches and prompt you to add more
-2. Scan your existing Claude config for branch protection rules and suggest additions
-3. Copy hook scripts to `~/.claude/hooks/`
-4. Copy slash commands to `~/.claude/commands/`
-5. Copy the protocols reference to `~/.claude/`
-6. Merge hook config into `~/.claude/settings.json`
-7. Detect conflicts with your existing config and back up before overwriting
-8. Print a full report of what was added/changed
+1. Detect conflicts with your existing config and ask how to resolve them
+2. Show the default protected branches and prompt you to add more
+3. Scan your existing Claude config for branch protection rules and suggest additions
+4. Install hook scripts to `~/.claude/hooks/` (merging your customizations)
+5. Install slash commands to `~/.claude/commands/`
+6. Install the protocols reference to `~/.claude/`
+7. Merge hook config into `~/.claude/settings.json` (non-destructive)
+8. Print a full report of what was installed, resolved, and skipped
 
 **Preview first** (no changes made):
 ```bash
@@ -227,6 +227,45 @@ claude-git-flow/
 
 # Created during setup (in ~/.claude/):
   git-flow-protected-branches.json      # Custom branches beyond the defaults
+```
+
+---
+
+## Conflict Resolution
+
+If you already have Claude Code hooks, commands, or config, the setup script detects conflicts and resolves them without losing your customizations.
+
+### Upfront mode selection
+
+At the start of setup (if any conflicts are detected), you choose:
+
+| Mode | Behavior |
+|------|----------|
+| **Interactive** (default) | Shows a diff for each conflict and lets you merge, overwrite, or skip |
+| **Auto-resolve** | Merges your customizations into the new versions automatically, backups saved |
+
+### What gets merged vs replaced
+
+| File | Conflict behavior |
+|------|-------------------|
+| `enforce-git-workflow.py` | **Smart merge** - your `DIRECT_TO_MAIN_REPOS` entries are extracted and injected into the new version |
+| `enforce-issue-workflow.py` | Interactive review or auto-replace with backup |
+| Slash commands (`.md`) | Interactive review or auto-replace with backup |
+| `github-repo-protocols.md` | Interactive review or auto-replace with backup |
+| `settings.json` | **Always merges** - appends hook entries without touching your existing config |
+| `CLAUDE.md` | **Never modified** - reports which sections are missing for you to add |
+| Custom protected branches | **Always preserved** - stored in a separate JSON config file |
+
+### Backups
+
+All original files are backed up to `~/.claude/backups/git-flow-{timestamp}/` before any changes. You can restore them manually if needed.
+
+### Non-interactive mode
+
+For agent-driven installs, use `--non-interactive` to skip all prompts and auto-resolve everything:
+
+```bash
+bash setup.sh --non-interactive
 ```
 
 ---
