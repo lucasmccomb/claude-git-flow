@@ -11,10 +11,29 @@ Issue -> Branch -> Implement -> Commit -> PR -> Merge -> Return to main
 - Every piece of work starts with a GitHub issue
 - Branches named `{issue-number}-{description}`
 - Commit messages formatted `{issue-number}: {description}`
-- No commits directly on `main` (must use feature branches)
-- No pushes to `main` (must use PRs)
+- No commits directly on protected branches (must use feature branches)
+- No pushes to protected branches (must use PRs)
 - Squash merges, delete branch on merge
 - No AI attribution in commits or PRs
+
+### Protected Branches
+
+The following branches are blocked from direct commits and pushes by default:
+
+| Branch | Common Use |
+|--------|-----------|
+| `main` | Primary branch (GitHub default) |
+| `master` | Primary branch (legacy default) |
+| `production` | Production deployment branch |
+| `prod` | Short form of production |
+| `staging` | Pre-production/QA environment |
+| `stag` | Short form of staging |
+| `develop` | Integration branch (git-flow) |
+| `dev` | Short form of develop |
+| `release` | Release preparation branch |
+| `trunk` | Primary branch (SVN/some teams) |
+
+**Custom branches** can be added during setup or later (see [Customization](#customization)).
 
 ## Quick Start
 
@@ -29,12 +48,14 @@ bash setup.sh
 ```
 
 The script will:
-1. Copy hook scripts to `~/.claude/hooks/`
-2. Copy slash commands to `~/.claude/commands/`
-3. Copy the protocols reference to `~/.claude/`
-4. Merge hook config into `~/.claude/settings.json`
-5. Detect conflicts with your existing config and back up before overwriting
-6. Print a full report of what was added/changed
+1. Show the default protected branches and prompt you to add more
+2. Scan your existing Claude config for branch protection rules and suggest additions
+3. Copy hook scripts to `~/.claude/hooks/`
+4. Copy slash commands to `~/.claude/commands/`
+5. Copy the protocols reference to `~/.claude/`
+6. Merge hook config into `~/.claude/settings.json`
+7. Detect conflicts with your existing config and back up before overwriting
+8. Print a full report of what was added/changed
 
 **Preview first** (no changes made):
 ```bash
@@ -131,9 +152,11 @@ A [`PreToolUse` hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that
 
 | Action | Result |
 |--------|--------|
-| `git commit` on `main` | **BLOCKED** - must use feature branch |
+| `git commit` on any protected branch | **BLOCKED** - must use feature branch |
 | `git commit -m "no issue number"` | **BLOCKED** - must use `{issue}: {desc}` format |
-| `git push` to `main` | **BLOCKED** - must use PR workflow |
+| `git push` to any protected branch | **BLOCKED** - must use PR workflow |
+
+Protected branches: `main`, `master`, `production`, `prod`, `staging`, `stag`, `develop`, `dev`, `release`, `trunk` (plus any custom branches you add).
 
 Emergency bypass: `ALLOW_MAIN_COMMIT=1 git commit ...`
 
@@ -176,7 +199,7 @@ gh repo edit owner/repo \
 ```
 claude-git-flow/
   README.md                             # This file
-  setup.sh                              # Automated installer
+  setup.sh                              # Automated installer (interactive)
   CLAUDE-git-sections.md                # Git workflow rules for CLAUDE.md
   github-repo-protocols.md              # Full lifecycle reference
   hooks/
@@ -189,11 +212,27 @@ claude-git-flow/
     gs.md                               # /gs
     sync.md                             # /sync
     new-issue.md                        # /new-issue
+
+# Created during setup (in ~/.claude/):
+  git-flow-protected-branches.json      # Custom branches beyond the defaults
 ```
 
 ---
 
 ## Customization
+
+### Add custom protected branches
+
+During `setup.sh`, you'll be prompted to add extra branches. You can also edit the config file directly:
+
+```bash
+# ~/.claude/git-flow-protected-branches.json
+["qa", "uat", "hotfix", "demo"]
+```
+
+The hook reads this file at runtime and merges it with the built-in defaults. Changes take effect immediately (no reinstall needed).
+
+Alternatively, edit `~/.claude/hooks/enforce-git-workflow.py` and modify the `PROTECTED_BRANCHES` list directly.
 
 ### Allow direct-to-main for specific repos
 

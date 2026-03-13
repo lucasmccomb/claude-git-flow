@@ -2,6 +2,10 @@
 #
 # Add these sections to your global CLAUDE.md.
 # They define the git workflow conventions that all agents follow.
+#
+# Protected branches (blocked from direct commit/push):
+#   main, master, production, prod, staging, stag, develop, dev, release, trunk
+#   Plus any custom branches in ~/.claude/git-flow-protected-branches.json
 
 ---
 

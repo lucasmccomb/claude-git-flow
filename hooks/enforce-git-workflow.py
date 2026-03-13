@@ -3,9 +3,9 @@
 PreToolUse:Bash hook to enforce GitHub Issues workflow.
 
 BLOCKS:
-1. Commits on main branch (must use feature branch)
+1. Commits on protected branches (must use feature branch)
 2. Commit messages without issue number prefix (^\d+:)
-3. Direct pushes to main branch (must use PR workflow)
+3. Direct pushes to protected branches (must use PR workflow)
 
 ESCAPE HATCHES:
 - ALLOW_MAIN_COMMIT=1 env var for emergencies
@@ -19,10 +19,42 @@ import re
 import subprocess
 import sys
 
+# ─── Protected branches ──────────────────────────────────────────────
+# Any branch matching one of these names (case-insensitive) is blocked
+# from direct commits and pushes. Use feature branches + PRs instead.
+#
+# To add custom branches, append to this list or use the setup script
+# which writes them to a config file.
+PROTECTED_BRANCHES = [
+    "main",
+    "master",
+    "production",
+    "prod",
+    "staging",
+    "stag",
+    "develop",
+    "dev",
+    "release",
+    "trunk",
+]
+
+# Load user-defined protected branches from config file (written by setup.sh)
+_CUSTOM_BRANCHES_FILE = os.path.expanduser(
+    "~/.claude/git-flow-protected-branches.json"
+)
+try:
+    with open(_CUSTOM_BRANCHES_FILE) as f:
+        _custom = json.load(f)
+        if isinstance(_custom, list):
+            PROTECTED_BRANCHES.extend(_custom)
+except (FileNotFoundError, json.JSONDecodeError, TypeError):
+    pass
+
+# Normalize to lowercase set for O(1) lookup
+PROTECTED_BRANCHES_SET = {b.lower() for b in PROTECTED_BRANCHES}
+
+# ─── Direct-to-main repos ────────────────────────────────────────────
 # Repos that use direct-to-main workflow (no feature branches, no issue numbers).
-# Matched against the git remote URL — any repo whose origin contains one of these
-# strings will skip all main-branch and commit-message checks.
-# Add repos that use direct-to-main workflow (no feature branches, no issue numbers).
 # Matched against the git remote URL. Example: "yourorg/your-dotfiles-repo"
 DIRECT_TO_MAIN_REPOS = [
     # "youruser/your-dotfiles",
@@ -42,6 +74,11 @@ def is_direct_to_main_repo():
     except Exception:
         pass
     return False
+
+
+def is_protected_branch(branch):
+    """Check if a branch name is in the protected list (case-insensitive)."""
+    return branch.lower() in PROTECTED_BRANCHES_SET
 
 
 def get_current_branch():
@@ -140,10 +177,11 @@ def check_commit(command, branch):
     if os.environ.get("ALLOW_MAIN_COMMIT") == "1":
         return
 
-    # Rule 1: No commits on main
-    if branch == "main":
+    # Rule 1: No commits on protected branches
+    if is_protected_branch(branch):
         deny(
-            "Cannot commit on main branch. Create a feature branch first:\n"
+            f"Cannot commit on protected branch '{branch}'. "
+            "Create a feature branch first:\n"
             "  1. gh issue create  (if no issue exists)\n"
             "  2. git checkout -b {issue-number}-{description}\n"
             "  3. Then commit\n\n"
@@ -175,18 +213,19 @@ def check_push(command, branch):
     if os.environ.get("ALLOW_MAIN_COMMIT") == "1":
         return
 
-    # Only block pushes when on main
-    if branch != "main":
+    # Only block pushes when on a protected branch
+    if not is_protected_branch(branch):
         return
 
-    # Parse what's being pushed to determine if it's actually pushing main
+    # Parse what's being pushed to determine if it's actually pushing
+    # the protected branch or an explicit different branch.
     # Allow: git push origin feature-branch (explicitly pushing a different branch)
     parts = command.split()
 
     # Find the refspec (what's being pushed)
-    # git push origin branch-name → pushing branch-name
-    # git push -u origin HEAD → pushing current branch (main)
-    # git push → pushing current branch (main)
+    # git push origin branch-name -> pushing branch-name
+    # git push -u origin HEAD -> pushing current branch
+    # git push -> pushing current branch
     push_target = None
     skip_next = False
     found_remote = False
@@ -214,17 +253,18 @@ def check_push(command, branch):
         push_target = part
         break
 
-    # HEAD means current branch (main), explicit branch name could differ
-    if push_target == "HEAD" or push_target == "main":
-        push_target = "main"
+    # HEAD means current branch, explicit branch name could differ
+    if push_target == "HEAD":
+        push_target = branch  # Resolves to current (protected) branch
     elif push_target is None:
-        # No explicit target → defaults to current branch (main)
-        push_target = "main"
-    elif push_target != "main":
-        return  # Pushing a specific non-main branch, allow
+        # No explicit target -> defaults to current branch
+        push_target = branch
+    elif not is_protected_branch(push_target):
+        return  # Pushing a specific non-protected branch, allow
 
     deny(
-        "Cannot push to main. Use the feature branch + PR workflow:\n"
+        f"Cannot push to protected branch '{branch}'. "
+        "Use the feature branch + PR workflow:\n"
         "  1. git checkout -b {issue-number}-{description}\n"
         "  2. Make changes and commit\n"
         "  3. git push -u origin HEAD\n"

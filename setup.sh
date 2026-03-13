@@ -45,18 +45,22 @@ CONFLICTS=()
 SKIPPED=()
 DRY_RUN=false
 UNINSTALL=false
+NON_INTERACTIVE=false
+CUSTOM_BRANCHES_FILE="$CLAUDE_DIR/git-flow-protected-branches.json"
 
 # ─── Parse args ───────────────────────────────────────────────────────
 for arg in "$@"; do
   case $arg in
     --check|--dry-run) DRY_RUN=true ;;
     --uninstall) UNINSTALL=true ;;
+    --non-interactive|-y) NON_INTERACTIVE=true ;;
     --help|-h)
-      echo "Usage: bash setup.sh [--check|--uninstall|--help]"
+      echo "Usage: bash setup.sh [--check|--uninstall|--non-interactive|--help]"
       echo ""
-      echo "  --check      Dry run - show what would change without modifying anything"
-      echo "  --uninstall  Remove all installed components"
-      echo "  --help       Show this help message"
+      echo "  --check             Dry run - show what would change without modifying anything"
+      echo "  --uninstall         Remove all installed components"
+      echo "  --non-interactive   Skip prompts, use defaults (for agent-driven installs)"
+      echo "  --help              Show this help message"
       exit 0
       ;;
   esac
@@ -162,6 +166,12 @@ do_uninstall() {
     removed+=("github-repo-protocols.md")
   fi
 
+  # Remove custom branches config
+  if [ -f "$CUSTOM_BRANCHES_FILE" ]; then
+    rm "$CUSTOM_BRANCHES_FILE"
+    removed+=("git-flow-protected-branches.json")
+  fi
+
   # Note: We don't remove settings.json hooks entries automatically
   # because the user may have other hooks configured
 
@@ -179,6 +189,157 @@ do_uninstall() {
   fi
   echo ""
   exit 0
+}
+
+# ─── Configure protected branches ────────────────────────────────────
+configure_protected_branches() {
+  echo -e "${BOLD}0. Protected Branch Configuration${NC}"
+  echo "───────────────────────────────────────────"
+  echo ""
+  echo "  The following branches are protected by default (commits and"
+  echo "  pushes are blocked, forcing the feature-branch + PR workflow):"
+  echo ""
+  echo "    main, master, production, prod, staging, stag,"
+  echo "    develop, dev, release, trunk"
+  echo ""
+
+  # Scan existing Claude configs for branch protection hints
+  local detected_branches=()
+
+  # Check CLAUDE.md for branch references
+  if [ -f "$CLAUDE_DIR/CLAUDE.md" ]; then
+    # Look for patterns like "main branch", "deploy from X", "protected: X"
+    local found
+    found=$(grep -oiE '(deploy|push|merge)\s+(to|from|into)\s+["`'\'']*([a-zA-Z0-9._/-]+)["`'\'']*' "$CLAUDE_DIR/CLAUDE.md" 2>/dev/null | \
+      grep -oiE '[a-zA-Z0-9._/-]+$' | sort -u || true)
+    if [ -n "$found" ]; then
+      while IFS= read -r b; do
+        # Skip if already in default list
+        local is_default=false
+        for d in main master production prod staging stag develop dev release trunk; do
+          if [ "${b,,}" = "$d" ]; then is_default=true; break; fi
+        done
+        if ! $is_default && [ -n "$b" ]; then
+          detected_branches+=("$b")
+        fi
+      done <<< "$found"
+    fi
+  fi
+
+  # Check settings.json for branch protection patterns in deny rules
+  if [ -f "$SETTINGS_FILE" ]; then
+    local deny_branches
+    deny_branches=$(jq -r '.permissions.deny[]? // empty' "$SETTINGS_FILE" 2>/dev/null | \
+      grep -oiE 'git push.*(origin\s+)?([a-zA-Z0-9._/-]+)' | \
+      grep -oE '[a-zA-Z0-9._/-]+$' | sort -u || true)
+    if [ -n "$deny_branches" ]; then
+      while IFS= read -r b; do
+        local is_default=false
+        for d in main master production prod staging stag develop dev release trunk; do
+          if [ "${b,,}" = "$d" ]; then is_default=true; break; fi
+        done
+        if ! $is_default && [ -n "$b" ]; then
+          # Avoid duplicates with detected_branches
+          local already=false
+          for existing in "${detected_branches[@]}"; do
+            if [ "${existing,,}" = "${b,,}" ]; then already=true; break; fi
+          done
+          if ! $already; then
+            detected_branches+=("$b")
+          fi
+        fi
+      done <<< "$deny_branches"
+    fi
+  fi
+
+  # Check existing git-flow config for previously saved custom branches
+  if [ -f "$CUSTOM_BRANCHES_FILE" ]; then
+    local existing_custom
+    existing_custom=$(jq -r '.[]' "$CUSTOM_BRANCHES_FILE" 2>/dev/null || true)
+    if [ -n "$existing_custom" ]; then
+      while IFS= read -r b; do
+        local already=false
+        for existing in "${detected_branches[@]}"; do
+          if [ "${existing,,}" = "${b,,}" ]; then already=true; break; fi
+        done
+        if ! $already && [ -n "$b" ]; then
+          detected_branches+=("$b")
+        fi
+      done <<< "$existing_custom"
+    fi
+  fi
+
+  # Report detected branches
+  if [ ${#detected_branches[@]} -gt 0 ]; then
+    echo -e "  ${CYAN}Detected from your existing Claude config:${NC}"
+    for db in "${detected_branches[@]}"; do
+      echo "    + $db"
+    done
+    echo ""
+  fi
+
+  # Ask user for additional branches
+  if ! $DRY_RUN && ! $NON_INTERACTIVE; then
+    echo "  Enter additional branch names to protect (comma-separated),"
+    echo "  or press Enter to skip:"
+    echo ""
+    read -r -p "  Additional branches: " user_input
+
+    local all_custom=("${detected_branches[@]}")
+
+    if [ -n "$user_input" ]; then
+      # Split by comma, trim whitespace
+      IFS=',' read -ra user_branches <<< "$user_input"
+      for ub in "${user_branches[@]}"; do
+        ub=$(echo "$ub" | xargs)  # trim
+        if [ -n "$ub" ]; then
+          # Check not already in defaults
+          local is_default=false
+          for d in main master production prod staging stag develop dev release trunk; do
+            if [ "${ub,,}" = "$d" ]; then is_default=true; break; fi
+          done
+          if $is_default; then
+            log_skip "'$ub' is already in the default protected list"
+          else
+            # Check not duplicate
+            local already=false
+            for existing in "${all_custom[@]}"; do
+              if [ "${existing,,}" = "${ub,,}" ]; then already=true; break; fi
+            done
+            if ! $already; then
+              all_custom+=("$ub")
+            fi
+          fi
+        fi
+      done
+    fi
+
+    # Write custom branches to config file
+    if [ ${#all_custom[@]} -gt 0 ]; then
+      printf '%s\n' "${all_custom[@]}" | jq -R . | jq -s . > "$CUSTOM_BRANCHES_FILE"
+      CHANGES_MADE+=("git-flow-protected-branches.json - SAVED ${#all_custom[@]} custom branch(es): ${all_custom[*]}")
+      echo ""
+      log_success "Saved ${#all_custom[@]} custom protected branch(es): ${all_custom[*]}"
+    else
+      log_skip "No custom branches added (using defaults only)"
+    fi
+  elif $DRY_RUN; then
+    if [ ${#detected_branches[@]} -gt 0 ]; then
+      log_info "Would prompt to confirm detected branches: ${detected_branches[*]}"
+    else
+      log_info "Would prompt for additional protected branches"
+    fi
+  else
+    # Non-interactive mode - save detected branches if any
+    if [ ${#detected_branches[@]} -gt 0 ]; then
+      printf '%s\n' "${detected_branches[@]}" | jq -R . | jq -s . > "$CUSTOM_BRANCHES_FILE"
+      CHANGES_MADE+=("git-flow-protected-branches.json - AUTO-SAVED ${#detected_branches[@]} detected branch(es): ${detected_branches[*]}")
+      log_success "Auto-saved ${#detected_branches[@]} detected protected branch(es): ${detected_branches[*]}"
+    else
+      log_skip "No custom branches detected (using defaults only)"
+    fi
+  fi
+  echo ""
 }
 
 # ─── Install hooks ───────────────────────────────────────────────────
@@ -569,9 +730,12 @@ print_report() {
     echo "  4. /cpm  (or /commit then /pr then merge)"
     echo ""
     echo "  The hooks will block you if you try to:"
-    echo "    - Commit on main"
+    echo "    - Commit on a protected branch"
     echo "    - Commit without issue number prefix"
-    echo "    - Push directly to main"
+    echo "    - Push directly to a protected branch"
+    echo ""
+    echo "  Protected branches: main, master, production, prod, staging,"
+    echo "  stag, develop, dev, release, trunk (+ any custom branches)"
     echo ""
   fi
 
@@ -589,6 +753,7 @@ main() {
   fi
 
   preflight
+  configure_protected_branches
   install_hooks
   install_commands
   install_protocols
