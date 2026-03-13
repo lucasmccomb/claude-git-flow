@@ -91,6 +91,30 @@ backup_file() {
   fi
 }
 
+# Prompt user before overwriting a file that differs.
+# Returns 0 (proceed) or 1 (skip). In non-interactive mode, always proceeds.
+confirm_overwrite() {
+  local label="$1"  # human-readable name, e.g. "hooks/enforce-git-workflow.py"
+  local src="$2"
+  local dst="$3"
+
+  if $NON_INTERACTIVE; then
+    return 0
+  fi
+
+  echo ""
+  echo -e "  ${YELLOW}$label differs from the version being installed.${NC}"
+  echo "  Showing diff (existing vs new):"
+  echo ""
+  diff --color=auto -u "$dst" "$src" | head -40 || true
+  echo ""
+  read -r -p "  Overwrite with new version? (backup will be saved) [y/N] " answer
+  case "${answer,,}" in
+    y|yes) return 0 ;;
+    *)     return 1 ;;
+  esac
+}
+
 # ─── Preflight checks ────────────────────────────────────────────────
 preflight() {
   echo ""
@@ -366,12 +390,15 @@ install_hooks() {
           echo "    Existing: $dst"
           echo "    Source:   $src"
           echo "    Action:   Would backup existing and overwrite"
-        else
+        elif confirm_overwrite "hooks/$hook" "$src" "$dst"; then
           backup_file "$dst"
           cp "$src" "$dst"
           chmod +x "$dst"
           CHANGES_MADE+=("hooks/$hook - UPDATED (backup saved)")
           log_success "Updated $hook (backup saved)"
+        else
+          SKIPPED+=("hooks/$hook - user chose to keep existing")
+          log_skip "$hook kept as-is (user declined overwrite)"
         fi
       else
         SKIPPED+=("hooks/$hook - already identical")
@@ -414,11 +441,14 @@ install_commands() {
         if $DRY_RUN; then
           log_warn "CONFLICT: /$name command already exists and differs"
           echo "    Action: Would backup existing and overwrite"
-        else
+        elif confirm_overwrite "commands/$cmd (/$name)" "$src" "$dst"; then
           backup_file "$dst"
           cp "$src" "$dst"
           CHANGES_MADE+=("commands/$cmd (/$name) - UPDATED (backup saved)")
           log_success "Updated /$name (backup saved)"
+        else
+          SKIPPED+=("commands/$cmd (/$name) - user chose to keep existing")
+          log_skip "/$name kept as-is (user declined overwrite)"
         fi
       else
         SKIPPED+=("commands/$cmd (/$name) - already identical")
@@ -451,11 +481,14 @@ install_protocols() {
       if $DRY_RUN; then
         log_warn "CONFLICT: github-repo-protocols.md already exists and differs"
         echo "    Action: Would backup existing and overwrite"
-      else
+      elif confirm_overwrite "github-repo-protocols.md" "$src" "$dst"; then
         backup_file "$dst"
         cp "$src" "$dst"
         CHANGES_MADE+=("github-repo-protocols.md - UPDATED (backup saved)")
         log_success "Updated github-repo-protocols.md (backup saved)"
+      else
+        SKIPPED+=("github-repo-protocols.md - user chose to keep existing")
+        log_skip "github-repo-protocols.md kept as-is (user declined overwrite)"
       fi
     else
       SKIPPED+=("github-repo-protocols.md - already identical")
