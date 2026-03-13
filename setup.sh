@@ -11,11 +11,12 @@
 #   bash setup.sh --uninstall    # Remove all installed components
 #
 # What it does:
-#   1. Copies hook scripts to ~/.claude/hooks/
-#   2. Copies slash commands to ~/.claude/commands/
-#   3. Copies github-repo-protocols.md to ~/.claude/
-#   4. Merges hook config into ~/.claude/settings.json
-#   5. Reports what was added/changed
+#   1. Asks how to handle conflicts (interactive review or auto-resolve)
+#   2. Copies hook scripts to ~/.claude/hooks/ (merges customizations)
+#   3. Copies slash commands to ~/.claude/commands/
+#   4. Copies github-repo-protocols.md to ~/.claude/
+#   5. Merges hook config into ~/.claude/settings.json
+#   6. Reports what was added/changed/resolved
 #
 # Requires: python3, jq (for JSON merging)
 
@@ -46,6 +47,7 @@ SKIPPED=()
 DRY_RUN=false
 UNINSTALL=false
 NON_INTERACTIVE=false
+CONFLICT_MODE=""  # "interactive" or "auto" - set during setup
 CUSTOM_BRANCHES_FILE="$CLAUDE_DIR/git-flow-protected-branches.json"
 
 # ─── Parse args ───────────────────────────────────────────────────────
@@ -91,28 +93,199 @@ backup_file() {
   fi
 }
 
-# Prompt user before overwriting a file that differs.
-# Returns 0 (proceed) or 1 (skip). In non-interactive mode, always proceeds.
-confirm_overwrite() {
-  local label="$1"  # human-readable name, e.g. "hooks/enforce-git-workflow.py"
-  local src="$2"
-  local dst="$3"
+# ─── Conflict resolution helpers ────────────────────────────────────
 
-  if $NON_INTERACTIVE; then
-    return 0
+# Ask user upfront how they want conflicts handled.
+choose_conflict_mode() {
+  if $DRY_RUN || $NON_INTERACTIVE; then
+    CONFLICT_MODE="auto"
+    return
   fi
 
+  # Check if any conflicts actually exist before asking
+  local has_conflicts=false
+  for hook in enforce-git-workflow.py enforce-issue-workflow.py; do
+    if [ -f "$HOOKS_DIR/$hook" ] && files_differ "$SCRIPT_DIR/hooks/$hook" "$HOOKS_DIR/$hook"; then
+      has_conflicts=true; break
+    fi
+  done
+  if ! $has_conflicts; then
+    for cmd in commit.md pr.md cpm.md gs.md sync.md new-issue.md; do
+      if [ -f "$COMMANDS_DIR/$cmd" ] && files_differ "$SCRIPT_DIR/commands/$cmd" "$COMMANDS_DIR/$cmd"; then
+        has_conflicts=true; break
+      fi
+    done
+  fi
+  if ! $has_conflicts && [ -f "$PROTOCOLS_FILE" ] && files_differ "$SCRIPT_DIR/github-repo-protocols.md" "$PROTOCOLS_FILE"; then
+    has_conflicts=true
+  fi
+
+  if ! $has_conflicts; then
+    CONFLICT_MODE="auto"  # No conflicts, doesn't matter
+    return
+  fi
+
+  echo -e "${BOLD}Conflict Resolution${NC}"
+  echo "───────────────────────────────────────────"
   echo ""
-  echo -e "  ${YELLOW}$label differs from the version being installed.${NC}"
-  echo "  Showing diff (existing vs new):"
+  echo "  Some existing files differ from the versions being installed."
+  echo "  How would you like to handle conflicts?"
   echo ""
-  diff --color=auto -u "$dst" "$src" | head -40 || true
+  echo "    1) ${BOLD}Interactive${NC} - Review each conflict with a diff and"
+  echo "       choose to merge, overwrite, or skip"
   echo ""
-  read -r -p "  Overwrite with new version? (backup will be saved) [y/N] " answer
-  case "${answer,,}" in
-    y|yes) return 0 ;;
-    *)     return 1 ;;
+  echo "    2) ${BOLD}Auto-resolve${NC} - Automatically merge your customizations"
+  echo "       into the new versions (backups saved for all changes)"
+  echo ""
+  read -r -p "  Choose [1/2] (default: 1): " mode_choice
+  case "$mode_choice" in
+    2) CONFLICT_MODE="auto" ;;
+    *) CONFLICT_MODE="interactive" ;;
   esac
+  echo ""
+}
+
+# Extract user customizations from an existing enforce-git-workflow.py.
+# Outputs the DIRECT_TO_MAIN_REPOS entries (one per line, without quotes/commas).
+extract_direct_to_main_repos() {
+  local file="$1"
+  # Extract lines between DIRECT_TO_MAIN_REPOS = [ and ], grab quoted strings
+  python3 -c "
+import re, sys
+content = open('$file').read()
+m = re.search(r'DIRECT_TO_MAIN_REPOS\s*=\s*\[(.*?)\]', content, re.DOTALL)
+if m:
+    for entry in re.findall(r'\"([^\"]+)\"', m.group(1)):
+        print(entry)
+" 2>/dev/null || true
+}
+
+# Merge user customizations into the new hook file.
+# Takes the new file path and injects DIRECT_TO_MAIN_REPOS entries.
+apply_direct_to_main_repos() {
+  local file="$1"
+  shift
+  local repos=("$@")
+
+  if [ ${#repos[@]} -eq 0 ]; then
+    return
+  fi
+
+  # Build the Python list entries
+  local entries=""
+  for repo in "${repos[@]}"; do
+    entries="${entries}    \"${repo}\",\n"
+  done
+
+  # Replace the empty/placeholder DIRECT_TO_MAIN_REPOS block
+  python3 -c "
+import re
+content = open('$file').read()
+# Match the DIRECT_TO_MAIN_REPOS block (with optional comments inside)
+pattern = r'(DIRECT_TO_MAIN_REPOS\s*=\s*\[)[^\]]*(\])'
+replacement = r'\1\n${entries}\2'
+content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+open('$file', 'w').write(content)
+" 2>/dev/null
+}
+
+# Resolve a file conflict. Handles interactive review or auto-merge.
+# For hooks: attempts smart merge of customizations.
+# For other files: interactive diff review or auto-overwrite with backup.
+# Returns 0 if file was updated, 1 if skipped.
+resolve_conflict() {
+  local label="$1"
+  local src="$2"
+  local dst="$3"
+  local file_type="$4"  # "hook" or "file"
+
+  if [ "$CONFLICT_MODE" = "interactive" ]; then
+    echo ""
+    echo -e "  ${YELLOW}CONFLICT: $label${NC}"
+    echo "  Your existing file differs from the version being installed."
+    echo ""
+
+    # For hooks, detect and show customizations
+    local custom_repos=()
+    if [ "$file_type" = "hook" ] && [[ "$dst" == *"enforce-git-workflow.py" ]]; then
+      while IFS= read -r repo; do
+        [ -n "$repo" ] && custom_repos+=("$repo")
+      done < <(extract_direct_to_main_repos "$dst")
+      if [ ${#custom_repos[@]} -gt 0 ]; then
+        echo -e "  ${CYAN}Detected your customizations:${NC}"
+        echo "    DIRECT_TO_MAIN_REPOS:"
+        for repo in "${custom_repos[@]}"; do
+          echo "      - $repo"
+        done
+        echo ""
+      fi
+    fi
+
+    echo "  Diff (your version vs new version):"
+    echo ""
+    diff --color=auto -u "$dst" "$src" | head -50 || true
+    echo ""
+
+    if [ ${#custom_repos[@]} -gt 0 ]; then
+      echo "  Options:"
+      echo "    m) Merge - install new version and preserve your customizations"
+      echo "    o) Overwrite - install new version (discard customizations)"
+      echo "    s) Skip - keep your existing version"
+      echo ""
+      read -r -p "  Choose [m/o/s] (default: m): " answer
+      case "${answer,,}" in
+        o)
+          backup_file "$dst"
+          cp "$src" "$dst"
+          return 0
+          ;;
+        s) return 1 ;;
+        *)
+          # Merge: install new version, then re-apply customizations
+          backup_file "$dst"
+          cp "$src" "$dst"
+          apply_direct_to_main_repos "$dst" "${custom_repos[@]}"
+          return 0
+          ;;
+      esac
+    else
+      echo "  Options:"
+      echo "    o) Overwrite - install new version (backup saved)"
+      echo "    s) Skip - keep your existing version"
+      echo ""
+      read -r -p "  Choose [o/s] (default: o): " answer
+      case "${answer,,}" in
+        s) return 1 ;;
+        *)
+          backup_file "$dst"
+          cp "$src" "$dst"
+          return 0
+          ;;
+      esac
+    fi
+
+  else
+    # Auto-resolve mode
+    backup_file "$dst"
+
+    # For hooks, try smart merge
+    if [ "$file_type" = "hook" ] && [[ "$dst" == *"enforce-git-workflow.py" ]]; then
+      local custom_repos=()
+      while IFS= read -r repo; do
+        [ -n "$repo" ] && custom_repos+=("$repo")
+      done < <(extract_direct_to_main_repos "$dst")
+
+      cp "$src" "$dst"
+
+      if [ ${#custom_repos[@]} -gt 0 ]; then
+        apply_direct_to_main_repos "$dst" "${custom_repos[@]}"
+        log_info "Merged your DIRECT_TO_MAIN_REPOS entries: ${custom_repos[*]}"
+      fi
+    else
+      cp "$src" "$dst"
+    fi
+    return 0
+  fi
 }
 
 # ─── Preflight checks ────────────────────────────────────────────────
@@ -389,16 +562,14 @@ install_hooks() {
           log_warn "CONFLICT: $hook already exists and differs"
           echo "    Existing: $dst"
           echo "    Source:   $src"
-          echo "    Action:   Would backup existing and overwrite"
-        elif confirm_overwrite "hooks/$hook" "$src" "$dst"; then
-          backup_file "$dst"
-          cp "$src" "$dst"
+          echo "    Action:   Would backup and resolve (merge customizations)"
+        elif resolve_conflict "hooks/$hook" "$src" "$dst" "hook"; then
           chmod +x "$dst"
-          CHANGES_MADE+=("hooks/$hook - UPDATED (backup saved)")
-          log_success "Updated $hook (backup saved)"
+          CHANGES_MADE+=("hooks/$hook - RESOLVED (backup saved)")
+          log_success "Resolved $hook (backup saved)"
         else
           SKIPPED+=("hooks/$hook - user chose to keep existing")
-          log_skip "$hook kept as-is (user declined overwrite)"
+          log_skip "$hook kept as-is (user declined)"
         fi
       else
         SKIPPED+=("hooks/$hook - already identical")
@@ -440,15 +611,13 @@ install_commands() {
         CONFLICTS+=("commands/$cmd (/$name) - EXISTS and DIFFERS")
         if $DRY_RUN; then
           log_warn "CONFLICT: /$name command already exists and differs"
-          echo "    Action: Would backup existing and overwrite"
-        elif confirm_overwrite "commands/$cmd (/$name)" "$src" "$dst"; then
-          backup_file "$dst"
-          cp "$src" "$dst"
-          CHANGES_MADE+=("commands/$cmd (/$name) - UPDATED (backup saved)")
-          log_success "Updated /$name (backup saved)"
+          echo "    Action: Would backup and resolve"
+        elif resolve_conflict "commands/$cmd (/$name)" "$src" "$dst" "file"; then
+          CHANGES_MADE+=("commands/$cmd (/$name) - RESOLVED (backup saved)")
+          log_success "Resolved /$name (backup saved)"
         else
           SKIPPED+=("commands/$cmd (/$name) - user chose to keep existing")
-          log_skip "/$name kept as-is (user declined overwrite)"
+          log_skip "/$name kept as-is (user declined)"
         fi
       else
         SKIPPED+=("commands/$cmd (/$name) - already identical")
@@ -480,15 +649,13 @@ install_protocols() {
       CONFLICTS+=("github-repo-protocols.md - EXISTS and DIFFERS")
       if $DRY_RUN; then
         log_warn "CONFLICT: github-repo-protocols.md already exists and differs"
-        echo "    Action: Would backup existing and overwrite"
-      elif confirm_overwrite "github-repo-protocols.md" "$src" "$dst"; then
-        backup_file "$dst"
-        cp "$src" "$dst"
-        CHANGES_MADE+=("github-repo-protocols.md - UPDATED (backup saved)")
-        log_success "Updated github-repo-protocols.md (backup saved)"
+        echo "    Action: Would backup and resolve"
+      elif resolve_conflict "github-repo-protocols.md" "$src" "$dst" "file"; then
+        CHANGES_MADE+=("github-repo-protocols.md - RESOLVED (backup saved)")
+        log_success "Resolved github-repo-protocols.md (backup saved)"
       else
         SKIPPED+=("github-repo-protocols.md - user chose to keep existing")
-        log_skip "github-repo-protocols.md kept as-is (user declined overwrite)"
+        log_skip "github-repo-protocols.md kept as-is (user declined)"
       fi
     else
       SKIPPED+=("github-repo-protocols.md - already identical")
@@ -724,13 +891,17 @@ print_report() {
   fi
 
   if [ ${#CONFLICTS[@]} -gt 0 ]; then
-    echo -e "${YELLOW}Conflicts / Manual Review Needed:${NC}"
+    if $DRY_RUN; then
+      echo -e "${YELLOW}Conflicts Detected (would be resolved during install):${NC}"
+    else
+      echo -e "${YELLOW}Conflicts Resolved:${NC}"
+    fi
     for conflict in "${CONFLICTS[@]}"; do
       echo "  ! $conflict"
     done
     echo ""
-    if ! $DRY_RUN; then
-      echo "  Backups saved to: $BACKUP_DIR"
+    if ! $DRY_RUN && [ -d "$BACKUP_DIR" ]; then
+      echo "  Original versions saved to: $BACKUP_DIR"
       echo ""
     fi
   fi
@@ -786,6 +957,7 @@ main() {
   fi
 
   preflight
+  choose_conflict_mode
   configure_protected_branches
   install_hooks
   install_commands
