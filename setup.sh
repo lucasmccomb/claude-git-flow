@@ -2,20 +2,21 @@
 #
 # claude-git-flow setup script
 #
-# This script installs the git flow enforcement system for Claude Code.
-# It can be run by a human OR by a Claude Code agent.
+# Installs the git flow enforcement system for Claude Code.
+# Can be run by a human OR by a Claude Code agent.
 #
 # Usage:
-#   bash setup.sh                # Interactive setup
+#   bash setup.sh                # Install to current repo's .claude/ (project-level)
+#   bash setup.sh --global       # Install to ~/.claude/ (global, all repos)
 #   bash setup.sh --check        # Dry run - show what would change
 #   bash setup.sh --uninstall    # Remove all installed components
 #
 # What it does:
 #   1. Asks how to handle conflicts (interactive review or auto-resolve)
-#   2. Copies hook scripts to ~/.claude/hooks/ (merges customizations)
-#   3. Copies slash commands to ~/.claude/commands/
-#   4. Copies github-repo-protocols.md to ~/.claude/
-#   5. Merges hook config into ~/.claude/settings.json
+#   2. Copies hook scripts to target hooks directory (merges customizations)
+#   3. Copies slash commands to target commands directory
+#   4. Merges hook config into target settings.json
+#   5. Creates .claude/logs/ directory (project-level only)
 #   6. Reports what was added/changed/resolved
 #
 # Requires: python3, jq (for JSON merging)
@@ -33,12 +34,6 @@ BOLD='\033[1m'
 
 # ─── Paths ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLAUDE_DIR="$HOME/.claude"
-HOOKS_DIR="$CLAUDE_DIR/hooks"
-COMMANDS_DIR="$CLAUDE_DIR/commands"
-SETTINGS_FILE="$CLAUDE_DIR/settings.json"
-PROTOCOLS_FILE="$CLAUDE_DIR/github-repo-protocols.md"
-BACKUP_DIR="$CLAUDE_DIR/backups/git-flow-$(date +%Y%m%d-%H%M%S)"
 
 # ─── State tracking ──────────────────────────────────────────────────
 CHANGES_MADE=()
@@ -48,25 +43,52 @@ DRY_RUN=false
 UNINSTALL=false
 NON_INTERACTIVE=false
 CONFLICT_MODE=""  # "interactive" or "auto" - set during setup
-CUSTOM_BRANCHES_FILE="$CLAUDE_DIR/git-flow-protected-branches.json"
+INSTALL_MODE=""   # "project" or "global" - set during setup
 
 # ─── Parse args ───────────────────────────────────────────────────────
 for arg in "$@"; do
   case $arg in
     --check|--dry-run) DRY_RUN=true ;;
     --uninstall) UNINSTALL=true ;;
+    --global) INSTALL_MODE="global" ;;
     --non-interactive|-y) NON_INTERACTIVE=true ;;
     --help|-h)
-      echo "Usage: bash setup.sh [--check|--uninstall|--non-interactive|--help]"
+      echo "Usage: bash setup.sh [OPTIONS]"
       echo ""
       echo "  --check             Dry run - show what would change without modifying anything"
+      echo "  --global            Install to ~/.claude/ (global, works for all repos)"
       echo "  --uninstall         Remove all installed components"
       echo "  --non-interactive   Skip prompts, use defaults (for agent-driven installs)"
       echo "  --help              Show this help message"
+      echo ""
+      echo "Default: Install to current repo's .claude/ (project-level, git-tracked)"
       exit 0
       ;;
   esac
 done
+
+# ─── Derived paths (set after install mode is determined) ─────────────
+CLAUDE_DIR=""
+HOOKS_DIR=""
+COMMANDS_DIR=""
+SETTINGS_FILE=""
+BACKUP_DIR=""
+CUSTOM_BRANCHES_FILE=""
+LOGS_DIR=""
+
+set_paths() {
+  if [ "$INSTALL_MODE" = "global" ]; then
+    CLAUDE_DIR="$HOME/.claude"
+  else
+    CLAUDE_DIR="$(pwd)/.claude"
+  fi
+  HOOKS_DIR="$CLAUDE_DIR/hooks"
+  COMMANDS_DIR="$CLAUDE_DIR/commands"
+  SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+  BACKUP_DIR="$CLAUDE_DIR/backups/git-flow-$(date +%Y%m%d-%H%M%S)"
+  CUSTOM_BRANCHES_FILE="$CLAUDE_DIR/git-flow-protected-branches.json"
+  LOGS_DIR="$CLAUDE_DIR/logs"
+}
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -110,14 +132,11 @@ choose_conflict_mode() {
     fi
   done
   if ! $has_conflicts; then
-    for cmd in commit.md pr.md cpm.md gs.md sync.md new-issue.md; do
+    for cmd in commit.md pr.md cpm.md gs.md new-issue.md; do
       if [ -f "$COMMANDS_DIR/$cmd" ] && files_differ "$SCRIPT_DIR/commands/$cmd" "$COMMANDS_DIR/$cmd"; then
         has_conflicts=true; break
       fi
     done
-  fi
-  if ! $has_conflicts && [ -f "$PROTOCOLS_FILE" ] && files_differ "$SCRIPT_DIR/github-repo-protocols.md" "$PROTOCOLS_FILE"; then
-    has_conflicts=true
   fi
 
   if ! $has_conflicts; then
@@ -288,6 +307,41 @@ resolve_conflict() {
   fi
 }
 
+# ─── Install mode selection ──────────────────────────────────────────
+choose_install_mode() {
+  if [ -n "$INSTALL_MODE" ]; then
+    return  # Already set via --global flag
+  fi
+
+  if $NON_INTERACTIVE; then
+    INSTALL_MODE="project"
+    return
+  fi
+
+  # Check if we're in a git repo
+  if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    log_warn "Not in a git repository. Defaulting to global install."
+    INSTALL_MODE="global"
+    return
+  fi
+
+  echo -e "${BOLD}Installation Mode${NC}"
+  echo "───────────────────────────────────────────"
+  echo ""
+  echo "  1) ${BOLD}Project-level${NC} (default) - Install to .claude/ in this repo"
+  echo "     Git-tracked, travels with the repo, per-project config"
+  echo ""
+  echo "  2) ${BOLD}Global${NC} - Install to ~/.claude/"
+  echo "     Works for all repos, single configuration"
+  echo ""
+  read -r -p "  Choose [1/2] (default: 1): " mode_choice
+  case "$mode_choice" in
+    2) INSTALL_MODE="global" ;;
+    *) INSTALL_MODE="project" ;;
+  esac
+  echo ""
+}
+
 # ─── Preflight checks ────────────────────────────────────────────────
 preflight() {
   echo ""
@@ -316,7 +370,14 @@ preflight() {
     log_warn "gh CLI is not authenticated. Run: gh auth login"
   fi
 
-  # Check Claude dir exists
+  if $DRY_RUN; then
+    echo -e "${YELLOW}DRY RUN MODE - No changes will be made${NC}"
+    echo ""
+  fi
+}
+
+# ─── Ensure target directories exist ─────────────────────────────────
+ensure_directories() {
   if [ ! -d "$CLAUDE_DIR" ]; then
     if $DRY_RUN; then
       log_info "Would create $CLAUDE_DIR"
@@ -324,11 +385,6 @@ preflight() {
       mkdir -p "$CLAUDE_DIR"
       log_info "Created $CLAUDE_DIR"
     fi
-  fi
-
-  if $DRY_RUN; then
-    echo -e "${YELLOW}DRY RUN MODE - No changes will be made${NC}"
-    echo ""
   fi
 }
 
@@ -339,33 +395,45 @@ do_uninstall() {
   echo "═══════════════════════════════════════════"
   echo ""
 
+  # Determine where to uninstall from
+  if [ "$INSTALL_MODE" != "global" ]; then
+    # Try project-level first, fall back to global
+    if [ -d "$(pwd)/.claude/hooks" ] && [ -f "$(pwd)/.claude/hooks/enforce-git-workflow.py" ]; then
+      CLAUDE_DIR="$(pwd)/.claude"
+    else
+      CLAUDE_DIR="$HOME/.claude"
+    fi
+  else
+    CLAUDE_DIR="$HOME/.claude"
+  fi
+
   local removed=()
 
   # Remove hook scripts
   for hook in enforce-git-workflow.py enforce-issue-workflow.py; do
-    if [ -f "$HOOKS_DIR/$hook" ]; then
-      rm "$HOOKS_DIR/$hook"
+    if [ -f "$CLAUDE_DIR/hooks/$hook" ]; then
+      rm "$CLAUDE_DIR/hooks/$hook"
       removed+=("hooks/$hook")
     fi
   done
 
   # Remove commands
   for cmd in commit.md pr.md cpm.md gs.md sync.md new-issue.md; do
-    if [ -f "$COMMANDS_DIR/$cmd" ]; then
-      rm "$COMMANDS_DIR/$cmd"
+    if [ -f "$CLAUDE_DIR/commands/$cmd" ]; then
+      rm "$CLAUDE_DIR/commands/$cmd"
       removed+=("commands/$cmd")
     fi
   done
 
-  # Remove protocols file
-  if [ -f "$PROTOCOLS_FILE" ]; then
-    rm "$PROTOCOLS_FILE"
-    removed+=("github-repo-protocols.md")
+  # Remove legacy protocols file (from older versions)
+  if [ -f "$CLAUDE_DIR/github-repo-protocols.md" ]; then
+    rm "$CLAUDE_DIR/github-repo-protocols.md"
+    removed+=("github-repo-protocols.md (legacy)")
   fi
 
   # Remove custom branches config
-  if [ -f "$CUSTOM_BRANCHES_FILE" ]; then
-    rm "$CUSTOM_BRANCHES_FILE"
+  if [ -f "$CLAUDE_DIR/git-flow-protected-branches.json" ]; then
+    rm "$CLAUDE_DIR/git-flow-protected-branches.json"
     removed+=("git-flow-protected-branches.json")
   fi
 
@@ -376,10 +444,10 @@ do_uninstall() {
   if [ ${#removed[@]} -gt 0 ]; then
     echo -e "${GREEN}Removed:${NC}"
     for item in "${removed[@]}"; do
-      echo "  - ~/.claude/$item"
+      echo "  - $CLAUDE_DIR/$item"
     done
     echo ""
-    log_warn "Hook entries in ~/.claude/settings.json were NOT removed automatically."
+    log_warn "Hook entries in $CLAUDE_DIR/settings.json were NOT removed automatically."
     log_warn "Manually remove the UserPromptSubmit and PreToolUse entries for enforce-*-workflow.py"
   else
     log_info "Nothing to remove - git flow was not installed."
@@ -390,7 +458,7 @@ do_uninstall() {
 
 # ─── Configure protected branches ────────────────────────────────────
 configure_protected_branches() {
-  echo -e "${BOLD}0. Protected Branch Configuration${NC}"
+  echo -e "${BOLD}1. Protected Branch Configuration${NC}"
   echo "───────────────────────────────────────────"
   echo ""
   echo "  The following branches are protected by default (commits and"
@@ -403,51 +471,31 @@ configure_protected_branches() {
   # Scan existing Claude configs for branch protection hints
   local detected_branches=()
 
-  # Check CLAUDE.md for branch references
-  if [ -f "$CLAUDE_DIR/CLAUDE.md" ]; then
-    # Look for patterns like "main branch", "deploy from X", "protected: X"
-    local found
-    found=$(grep -oiE '(deploy|push|merge)\s+(to|from|into)\s+["`'\'']*([a-zA-Z0-9._/-]+)["`'\'']*' "$CLAUDE_DIR/CLAUDE.md" 2>/dev/null | \
-      grep -oiE '[a-zA-Z0-9._/-]+$' | sort -u || true)
-    if [ -n "$found" ]; then
-      while IFS= read -r b; do
-        # Skip if already in default list
-        local is_default=false
-        for d in main master production prod staging stag develop dev release trunk; do
-          if [ "${b,,}" = "$d" ]; then is_default=true; break; fi
-        done
-        if ! $is_default && [ -n "$b" ]; then
-          detected_branches+=("$b")
-        fi
-      done <<< "$found"
-    fi
-  fi
-
-  # Check settings.json for branch protection patterns in deny rules
-  if [ -f "$SETTINGS_FILE" ]; then
-    local deny_branches
-    deny_branches=$(jq -r '.permissions.deny[]? // empty' "$SETTINGS_FILE" 2>/dev/null | \
-      grep -oiE 'git push.*(origin\s+)?([a-zA-Z0-9._/-]+)' | \
-      grep -oE '[a-zA-Z0-9._/-]+$' | sort -u || true)
-    if [ -n "$deny_branches" ]; then
-      while IFS= read -r b; do
-        local is_default=false
-        for d in main master production prod staging stag develop dev release trunk; do
-          if [ "${b,,}" = "$d" ]; then is_default=true; break; fi
-        done
-        if ! $is_default && [ -n "$b" ]; then
-          # Avoid duplicates with detected_branches
-          local already=false
-          for existing in "${detected_branches[@]}"; do
-            if [ "${existing,,}" = "${b,,}" ]; then already=true; break; fi
+  # Check CLAUDE.md for branch references (check both global and project)
+  for claude_md in "$HOME/.claude/CLAUDE.md" "$(pwd)/CLAUDE.md" "$(pwd)/.claude/CLAUDE.md"; do
+    if [ -f "$claude_md" ]; then
+      local found
+      found=$(grep -oiE '(deploy|push|merge)\s+(to|from|into)\s+["`'\'']*([a-zA-Z0-9._/-]+)["`'\'']*' "$claude_md" 2>/dev/null | \
+        grep -oiE '[a-zA-Z0-9._/-]+$' | sort -u || true)
+      if [ -n "$found" ]; then
+        while IFS= read -r b; do
+          local is_default=false
+          for d in main master production prod staging stag develop dev release trunk; do
+            if [ "${b,,}" = "$d" ]; then is_default=true; break; fi
           done
-          if ! $already; then
-            detected_branches+=("$b")
+          if ! $is_default && [ -n "$b" ]; then
+            local already=false
+            for existing in "${detected_branches[@]+"${detected_branches[@]}"}"; do
+              if [ "${existing,,}" = "${b,,}" ]; then already=true; break; fi
+            done
+            if ! $already; then
+              detected_branches+=("$b")
+            fi
           fi
-        fi
-      done <<< "$deny_branches"
+        done <<< "$found"
+      fi
     fi
-  fi
+  done
 
   # Check existing git-flow config for previously saved custom branches
   if [ -f "$CUSTOM_BRANCHES_FILE" ]; then
@@ -456,7 +504,7 @@ configure_protected_branches() {
     if [ -n "$existing_custom" ]; then
       while IFS= read -r b; do
         local already=false
-        for existing in "${detected_branches[@]}"; do
+        for existing in "${detected_branches[@]+"${detected_branches[@]}"}"; do
           if [ "${existing,,}" = "${b,,}" ]; then already=true; break; fi
         done
         if ! $already && [ -n "$b" ]; then
@@ -482,15 +530,13 @@ configure_protected_branches() {
     echo ""
     read -r -p "  Additional branches: " user_input
 
-    local all_custom=("${detected_branches[@]}")
+    local all_custom=("${detected_branches[@]+"${detected_branches[@]}"}")
 
     if [ -n "$user_input" ]; then
-      # Split by comma, trim whitespace
       IFS=',' read -ra user_branches <<< "$user_input"
       for ub in "${user_branches[@]}"; do
         ub=$(echo "$ub" | xargs)  # trim
         if [ -n "$ub" ]; then
-          # Check not already in defaults
           local is_default=false
           for d in main master production prod staging stag develop dev release trunk; do
             if [ "${ub,,}" = "$d" ]; then is_default=true; break; fi
@@ -498,9 +544,8 @@ configure_protected_branches() {
           if $is_default; then
             log_skip "'$ub' is already in the default protected list"
           else
-            # Check not duplicate
             local already=false
-            for existing in "${all_custom[@]}"; do
+            for existing in "${all_custom[@]+"${all_custom[@]}"}"; do
               if [ "${existing,,}" = "${ub,,}" ]; then already=true; break; fi
             done
             if ! $already; then
@@ -541,7 +586,7 @@ configure_protected_branches() {
 
 # ─── Install hooks ───────────────────────────────────────────────────
 install_hooks() {
-  echo -e "${BOLD}1. Hook Scripts${NC}"
+  echo -e "${BOLD}2. Hook Scripts${NC}"
   echo "───────────────────────────────────────────"
 
   mkdir -p "$HOOKS_DIR"
@@ -591,12 +636,12 @@ install_hooks() {
 
 # ─── Install commands ────────────────────────────────────────────────
 install_commands() {
-  echo -e "${BOLD}2. Slash Commands${NC}"
+  echo -e "${BOLD}3. Slash Commands${NC}"
   echo "───────────────────────────────────────────"
 
   mkdir -p "$COMMANDS_DIR"
 
-  for cmd in commit.md pr.md cpm.md gs.md sync.md new-issue.md; do
+  for cmd in commit.md pr.md cpm.md gs.md new-issue.md; do
     local src="$SCRIPT_DIR/commands/$cmd"
     local dst="$COMMANDS_DIR/$cmd"
     local name="${cmd%.md}"
@@ -636,65 +681,25 @@ install_commands() {
   echo ""
 }
 
-# ─── Install protocols file ─────────────────────────────────────────
-install_protocols() {
-  echo -e "${BOLD}3. GitHub Repo Protocols${NC}"
-  echo "───────────────────────────────────────────"
-
-  local src="$SCRIPT_DIR/github-repo-protocols.md"
-  local dst="$PROTOCOLS_FILE"
-
-  if [ -f "$dst" ]; then
-    if files_differ "$src" "$dst"; then
-      CONFLICTS+=("github-repo-protocols.md - EXISTS and DIFFERS")
-      if $DRY_RUN; then
-        log_warn "CONFLICT: github-repo-protocols.md already exists and differs"
-        echo "    Action: Would backup and resolve"
-      elif resolve_conflict "github-repo-protocols.md" "$src" "$dst" "file"; then
-        CHANGES_MADE+=("github-repo-protocols.md - RESOLVED (backup saved)")
-        log_success "Resolved github-repo-protocols.md (backup saved)"
-      else
-        SKIPPED+=("github-repo-protocols.md - user chose to keep existing")
-        log_skip "github-repo-protocols.md kept as-is (user declined)"
-      fi
-    else
-      SKIPPED+=("github-repo-protocols.md - already identical")
-      log_skip "github-repo-protocols.md already installed and identical"
-    fi
-  else
-    if $DRY_RUN; then
-      log_info "Would install: github-repo-protocols.md"
-    else
-      cp "$src" "$dst"
-      CHANGES_MADE+=("github-repo-protocols.md - INSTALLED")
-      log_success "Installed github-repo-protocols.md"
-    fi
-  fi
-
-  # Check for placeholder username
-  if [ -f "$dst" ] && grep -q "<your-github-username>" "$dst" 2>/dev/null; then
-    log_warn "github-repo-protocols.md contains '<your-github-username>' placeholders."
-    log_warn "Replace with your actual GitHub username:"
-    echo "    sed -i'' -e 's/<your-github-username>/YOUR_USERNAME/g' $dst"
-  fi
-  echo ""
-}
-
 # ─── Merge settings.json hooks ───────────────────────────────────────
 install_settings_hooks() {
   echo -e "${BOLD}4. Settings.json Hook Configuration${NC}"
   echo "───────────────────────────────────────────"
 
-  # Define the hooks we need to add
-  local user_prompt_hook='{"hooks":[{"type":"command","command":"python3 $HOME/.claude/hooks/enforce-issue-workflow.py","timeout":5000}]}'
-  local pre_tool_hook='{"matcher":"Bash","hooks":[{"type":"command","command":"$HOME/.claude/hooks/enforce-git-workflow.py","timeout":5000}]}'
+  # Determine the hook command paths based on install mode
+  local hook_prefix
+  if [ "$INSTALL_MODE" = "global" ]; then
+    hook_prefix="\$HOME/.claude"
+  else
+    hook_prefix=".claude"
+  fi
 
   if [ ! -f "$SETTINGS_FILE" ]; then
     # No settings.json exists - create one with just hooks
     if $DRY_RUN; then
       log_info "Would create settings.json with hook configuration"
     else
-      cat > "$SETTINGS_FILE" << 'SETTINGS_EOF'
+      cat > "$SETTINGS_FILE" << SETTINGS_EOF
 {
   "hooks": {
     "UserPromptSubmit": [
@@ -702,7 +707,7 @@ install_settings_hooks() {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 $HOME/.claude/hooks/enforce-issue-workflow.py",
+            "command": "python3 ${hook_prefix}/hooks/enforce-issue-workflow.py",
             "timeout": 5000
           }
         ]
@@ -714,7 +719,7 @@ install_settings_hooks() {
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/enforce-git-workflow.py",
+            "command": "${hook_prefix}/hooks/enforce-git-workflow.py",
             "timeout": 5000
           }
         ]
@@ -735,7 +740,6 @@ SETTINGS_EOF
     local has_pre_tool=false
 
     if jq -e '.hooks.UserPromptSubmit' "$SETTINGS_FILE" > /dev/null 2>&1; then
-      # Check if our specific hook is already there
       if jq -e '.hooks.UserPromptSubmit[]?.hooks[]? | select(.command | contains("enforce-issue-workflow"))' "$SETTINGS_FILE" > /dev/null 2>&1; then
         has_user_prompt=true
       fi
@@ -775,12 +779,11 @@ SETTINGS_EOF
 
         # Add UserPromptSubmit if missing
         if ! $has_user_prompt; then
+          local ups_command="python3 ${hook_prefix}/hooks/enforce-issue-workflow.py"
           if jq -e '.hooks.UserPromptSubmit' "$tmp_file" > /dev/null 2>&1; then
-            # Array exists, append our hook
-            jq '.hooks.UserPromptSubmit += [{"hooks":[{"type":"command","command":"python3 $HOME/.claude/hooks/enforce-issue-workflow.py","timeout":5000}]}]' "$tmp_file" > "${tmp_file}.new" && mv "${tmp_file}.new" "$tmp_file"
+            jq --arg cmd "$ups_command" '.hooks.UserPromptSubmit += [{"hooks":[{"type":"command","command":$cmd,"timeout":5000}]}]' "$tmp_file" > "${tmp_file}.new" && mv "${tmp_file}.new" "$tmp_file"
           else
-            # Create the array
-            jq '.hooks.UserPromptSubmit = [{"hooks":[{"type":"command","command":"python3 $HOME/.claude/hooks/enforce-issue-workflow.py","timeout":5000}]}]' "$tmp_file" > "${tmp_file}.new" && mv "${tmp_file}.new" "$tmp_file"
+            jq --arg cmd "$ups_command" '.hooks.UserPromptSubmit = [{"hooks":[{"type":"command","command":$cmd,"timeout":5000}]}]' "$tmp_file" > "${tmp_file}.new" && mv "${tmp_file}.new" "$tmp_file"
           fi
           CHANGES_MADE+=("settings.json - Added UserPromptSubmit hook")
           log_success "Added UserPromptSubmit hook (enforce-issue-workflow.py)"
@@ -788,12 +791,11 @@ SETTINGS_EOF
 
         # Add PreToolUse if missing
         if ! $has_pre_tool; then
+          local ptu_command="${hook_prefix}/hooks/enforce-git-workflow.py"
           if jq -e '.hooks.PreToolUse' "$tmp_file" > /dev/null 2>&1; then
-            # Array exists, append our hook
-            jq '.hooks.PreToolUse += [{"matcher":"Bash","hooks":[{"type":"command","command":"$HOME/.claude/hooks/enforce-git-workflow.py","timeout":5000}]}]' "$tmp_file" > "${tmp_file}.new" && mv "${tmp_file}.new" "$tmp_file"
+            jq --arg cmd "$ptu_command" '.hooks.PreToolUse += [{"matcher":"Bash","hooks":[{"type":"command","command":$cmd,"timeout":5000}]}]' "$tmp_file" > "${tmp_file}.new" && mv "${tmp_file}.new" "$tmp_file"
           else
-            # Create the array
-            jq '.hooks.PreToolUse = [{"matcher":"Bash","hooks":[{"type":"command","command":"$HOME/.claude/hooks/enforce-git-workflow.py","timeout":5000}]}]' "$tmp_file" > "${tmp_file}.new" && mv "${tmp_file}.new" "$tmp_file"
+            jq --arg cmd "$ptu_command" '.hooks.PreToolUse = [{"matcher":"Bash","hooks":[{"type":"command","command":$cmd,"timeout":5000}]}]' "$tmp_file" > "${tmp_file}.new" && mv "${tmp_file}.new" "$tmp_file"
           fi
           CHANGES_MADE+=("settings.json - Added PreToolUse hook")
           log_success "Added PreToolUse hook (enforce-git-workflow.py)"
@@ -808,63 +810,85 @@ SETTINGS_EOF
   echo ""
 }
 
-# ─── Check CLAUDE.md ─────────────────────────────────────────────────
-check_claude_md() {
-  echo -e "${BOLD}5. CLAUDE.md Git Flow Sections${NC}"
+# ─── Set up coordination logs (project-level only) ──────────────────
+setup_logs() {
+  if [ "$INSTALL_MODE" = "global" ]; then
+    log_skip "Logs directory is per-project only (skipped for global install)"
+    echo ""
+    return
+  fi
+
+  echo -e "${BOLD}5. Coordination Logs${NC}"
   echo "───────────────────────────────────────────"
 
-  local claude_md="$CLAUDE_DIR/CLAUDE.md"
-  local sections_file="$SCRIPT_DIR/CLAUDE-git-sections.md"
-
-  if [ ! -f "$claude_md" ]; then
+  if [ -d "$LOGS_DIR" ]; then
+    SKIPPED+=(".claude/logs/ - already exists")
+    log_skip ".claude/logs/ already exists"
+  else
     if $DRY_RUN; then
-      log_info "No ~/.claude/CLAUDE.md found."
-      log_info "Would note: You should create one and add the git flow sections."
+      log_info "Would create .claude/logs/ directory"
+      log_info "Would copy learnings.md template"
     else
-      log_warn "No ~/.claude/CLAUDE.md found."
-      log_warn "You should create ~/.claude/CLAUDE.md and add the contents of:"
-      echo "    $sections_file"
-      CHANGES_MADE+=("CLAUDE.md - ACTION REQUIRED: Add git flow sections manually")
+      mkdir -p "$LOGS_DIR"
+      cp "$SCRIPT_DIR/templates/logs/learnings.md" "$LOGS_DIR/learnings.md"
+      CHANGES_MADE+=(".claude/logs/ - CREATED with learnings.md template")
+      log_success "Created .claude/logs/ with learnings.md template"
+    fi
+  fi
+
+  # Add .claude/logs/ to .gitignore if not already there
+  local gitignore="$(pwd)/.gitignore"
+  if [ -f "$gitignore" ]; then
+    if ! grep -q '\.claude/logs/' "$gitignore" 2>/dev/null; then
+      if $DRY_RUN; then
+        log_info "Would add .claude/logs/ tracking note"
+      fi
+    fi
+  fi
+
+  echo ""
+}
+
+# ─── Check CLAUDE.md ─────────────────────────────────────────────────
+check_claude_md() {
+  echo -e "${BOLD}6. CLAUDE.md Git Flow Sections${NC}"
+  echo "───────────────────────────────────────────"
+
+  # Determine which CLAUDE.md to check
+  local claude_md
+  if [ "$INSTALL_MODE" = "global" ]; then
+    claude_md="$HOME/.claude/CLAUDE.md"
+  else
+    # Check project-level first, then repo root
+    if [ -f "$(pwd)/.claude/CLAUDE.md" ]; then
+      claude_md="$(pwd)/.claude/CLAUDE.md"
+    elif [ -f "$(pwd)/CLAUDE.md" ]; then
+      claude_md="$(pwd)/CLAUDE.md"
+    else
+      claude_md=""
+    fi
+  fi
+
+  if [ -z "$claude_md" ] || [ ! -f "$claude_md" ]; then
+    if $DRY_RUN; then
+      log_info "No CLAUDE.md found."
+      log_info "Would note: You should add the git flow sections from the README."
+    else
+      log_warn "No CLAUDE.md found."
+      log_warn "Add the 'Copy to Your CLAUDE.md' block from the README."
     fi
   else
     # Check if key sections already exist
-    local has_no_ai=$(grep -c "No AI Attribution in Commits" "$claude_md" 2>/dev/null || true)
-    local has_pr_template=$(grep -c "Use PR Templates When Creating Pull Requests" "$claude_md" 2>/dev/null || true)
-    local has_rebase=$(grep -c "Branch Updates: Rebase by Default" "$claude_md" 2>/dev/null || true)
-    local has_post_merge=$(grep -c "Post-Merge: Return to Main" "$claude_md" 2>/dev/null || true)
-    local has_sync=$(grep -c "Sync Before Any Git History Changes" "$claude_md" 2>/dev/null || true)
+    local has_commit_format
+    has_commit_format=$(grep -c '#.*: description' "$claude_md" 2>/dev/null || true)
+    local has_branch_workflow
+    has_branch_workflow=$(grep -c 'feature.branch\|issue.*branch\|branch.*issue' "$claude_md" 2>/dev/null || true)
 
-    local missing=0
-    local present=0
-
-    for check in "$has_no_ai" "$has_pr_template" "$has_rebase" "$has_post_merge" "$has_sync"; do
-      if [ "$check" -gt 0 ]; then
-        ((present++))
-      else
-        ((missing++))
-      fi
-    done
-
-    if [ "$missing" -eq 0 ]; then
-      SKIPPED+=("CLAUDE.md - all git flow sections already present")
-      log_skip "All key git flow sections already present in CLAUDE.md"
-    elif [ "$present" -gt 0 ]; then
-      CONFLICTS+=("CLAUDE.md - has $present of 5 git flow sections; $missing missing")
-      log_warn "CLAUDE.md has some git flow sections ($present/5 found, $missing missing)"
-      log_warn "Review and add missing sections from:"
-      echo "    $sections_file"
-      echo ""
-      echo "    Missing sections:"
-      [ "$has_no_ai" -eq 0 ] && echo "      - No AI Attribution in Commits"
-      [ "$has_pr_template" -eq 0 ] && echo "      - Use PR Templates When Creating Pull Requests"
-      [ "$has_sync" -eq 0 ] && echo "      - Sync Before Any Git History Changes"
-      [ "$has_rebase" -eq 0 ] && echo "      - Branch Updates: Rebase by Default"
-      [ "$has_post_merge" -eq 0 ] && echo "      - Post-Merge: Return to Main"
+    if [ "$has_commit_format" -gt 0 ] && [ "$has_branch_workflow" -gt 0 ]; then
+      log_skip "CLAUDE.md appears to have git flow sections already"
     else
-      log_warn "CLAUDE.md exists but has none of the git flow sections."
-      log_warn "Add the contents of this file to your CLAUDE.md:"
-      echo "    $sections_file"
-      CHANGES_MADE+=("CLAUDE.md - ACTION REQUIRED: Add git flow sections")
+      log_warn "CLAUDE.md may be missing git flow sections."
+      log_warn "Add the 'Copy to Your CLAUDE.md' block from the README."
     fi
   fi
   echo ""
@@ -880,6 +904,9 @@ print_report() {
     echo -e "${BOLD}INSTALLATION REPORT${NC}"
   fi
   echo "═══════════════════════════════════════════"
+  echo ""
+
+  echo -e "  Install mode: ${BOLD}${INSTALL_MODE}${NC} ($CLAUDE_DIR)"
   echo ""
 
   if [ ${#CHANGES_MADE[@]} -gt 0 ]; then
@@ -920,22 +947,21 @@ print_report() {
     echo ""
     echo "  /gs         Show git status, branch, open PRs"
     echo "  /new-issue  Create a GitHub issue with labels"
-    echo "  /commit     Stage + commit (format: {issue}: {description})"
+    echo "  /commit     Stage + commit (format: #42: description)"
     echo "  /pr         Push + create PR that closes the issue"
     echo "  /cpm        One-shot: commit + PR + merge + cleanup"
-    echo "  /sync       Fetch origin + rebase on main"
     echo ""
     echo "───────────────────────────────────────────"
     echo -e "${BOLD}Workflow:${NC}"
     echo ""
     echo "  1. /new-issue  (or gh issue create)"
-    echo "  2. git checkout -b {issue-number}-{description}"
+    echo "  2. git checkout -b {issue#}-{description} origin/main"
     echo "  3. Make changes"
     echo "  4. /cpm  (or /commit then /pr then merge)"
     echo ""
     echo "  The hooks will block you if you try to:"
     echo "    - Commit on a protected branch"
-    echo "    - Commit without issue number prefix"
+    echo "    - Commit without #issue_number: prefix"
     echo "    - Push directly to a protected branch"
     echo ""
     echo "  Protected branches: main, master, production, prod, staging,"
@@ -951,18 +977,24 @@ print_report() {
 
 # ─── Main ─────────────────────────────────────────────────────────────
 main() {
+  preflight
+
   if $UNINSTALL; then
+    choose_install_mode
+    set_paths
     do_uninstall
     exit 0
   fi
 
-  preflight
+  choose_install_mode
+  set_paths
+  ensure_directories
   choose_conflict_mode
   configure_protected_branches
   install_hooks
   install_commands
-  install_protocols
   install_settings_hooks
+  setup_logs
   check_claude_md
   print_report
 }

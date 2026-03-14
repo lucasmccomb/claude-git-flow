@@ -1,7 +1,7 @@
 ---
 description: Stage all changes and commit with conventional format
 allowed-tools: Bash(git:*), Bash(npm:*)
-argument-hint: [issue_number]: [description]
+argument-hint: #[issue_number]: [description]
 ---
 
 # Git Commit
@@ -40,9 +40,10 @@ argument-hint: [issue_number]: [description]
 
 ## Commit Message Format
 
-Expected: `{issue_number}: {brief description}`
-- Example: `4: Add user authentication`
-- Example: `12: Fix calendar alignment bug`
+Expected: `#{issue_number}: {brief description}`
+- Example: `#4: Add user authentication`
+- Example: `#12: Fix calendar alignment bug`
+- Also allowed: `sync: {description}` for log/coordination commits
 
 The message provided is: `$ARGUMENTS`
 

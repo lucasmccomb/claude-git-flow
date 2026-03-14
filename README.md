@@ -1,45 +1,56 @@
 # claude-git-flow
 
-A strict GitHub Issues workflow for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents. Enforces issue-first development with programmatic guardrails so that multiple engineers (and their agents) can work in the same repos with minimal conflicts.
+Enforced GitHub Issues workflow for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents. Hooks block bad behavior, commands automate the good behavior, logs coordinate multiple developers.
 
 ```
 Issue -> Branch -> Implement -> Commit -> PR -> Merge -> Return to main
 ```
 
-## What It Enforces
+## Why This Exists
 
-- Every piece of work starts with a GitHub issue
-- Branches named `{issue-number}-{description}`
-- Commit messages formatted `{issue-number}: {description}`
-- No commits directly on protected branches (must use feature branches)
-- No pushes to protected branches (must use PRs)
-- Squash merges, delete branch on merge
-- No AI attribution in commits or PRs
+Agents ignore conventions without enforcement. When multiple developers (or agents) work in the same repo, you need:
 
-### Protected Branches
+- **Rules that can't be bypassed** (hooks that block bad commits/pushes)
+- **Coordination that happens automatically** (injected context, not manual commands)
+- **A record of who did what** (git-tracked logs)
 
-The following branches are blocked from direct commits and pushes by default:
+CLAUDE.md instructions are suggestions. Hooks are laws. This system uses both.
 
-| Branch | Common Use |
-|--------|-----------|
-| `main` | Primary branch (GitHub default) |
-| `master` | Primary branch (legacy default) |
-| `production` | Production deployment branch |
-| `prod` | Short form of production |
-| `staging` | Pre-production/QA environment |
-| `stag` | Short form of staging |
-| `develop` | Integration branch (git-flow) |
-| `dev` | Short form of develop |
-| `release` | Release preparation branch |
-| `trunk` | Primary branch (SVN/some teams) |
+## How It Works
 
-**Custom branches** can be added during setup or later (see [Customization](#customization)).
+### Layer 1: Hooks (hard enforcement)
+
+**enforce-git-workflow.py** (PreToolUse) - Intercepts every `Bash` command. Blocks commits on protected branches. Requires `#42:` format in messages. Blocks pushes to protected branches. You can't accidentally skip the workflow.
+
+**enforce-issue-workflow.py** (UserPromptSubmit) - Intercepts every prompt. Detects work requests ("add", "fix", "implement") and injects the full workflow: create issue, create branch, check coordination logs, then implement. This is the most powerful layer - it reshapes the agent's behavior before it writes a single line of code.
+
+### Layer 2: Commands (automation)
+
+Shortcuts for multi-step git operations with the right format:
+
+| Command | What it does |
+|---------|-------------|
+| `/gs` | Show git status, current branch, open PRs |
+| `/new-issue` | Create a GitHub issue with proper labels |
+| `/commit` | Stage + commit with `#42: description` format |
+| `/pr` | Rebase + push + create PR with `Closes #42` |
+| `/cpm` | One-shot: commit + PR + merge (for solo repos) |
+
+### Layer 3: Logging (coordination)
+
+`.claude/logs/` in the project repo. Each agent writes a daily log. Other agents read these logs to detect file conflicts and understand context. Maintained automatically through CLAUDE.md instructions and hook-injected reminders - no explicit commands needed.
+
+```
+.claude/logs/
+  YYYYMMDD/
+    agent-0.md        # Each agent's session log
+    agent-1.md
+  learnings.md        # Persistent cross-developer knowledge
+```
 
 ## Quick Start
 
 ### Option A: Automated Setup (Recommended)
-
-Clone the repo and run the setup script:
 
 ```bash
 git clone https://github.com/lucasmccomb/claude-git-flow.git
@@ -48,14 +59,18 @@ bash setup.sh
 ```
 
 The script will:
-1. Detect conflicts with your existing config and ask how to resolve them
-2. Show the default protected branches and prompt you to add more
-3. Scan your existing Claude config for branch protection rules and suggest additions
-4. Install hook scripts to `~/.claude/hooks/` (merging your customizations)
-5. Install slash commands to `~/.claude/commands/`
-6. Install the protocols reference to `~/.claude/`
-7. Merge hook config into `~/.claude/settings.json` (non-destructive)
-8. Print a full report of what was installed, resolved, and skipped
+1. Ask where to install: **project-level** (default, `.claude/` in your repo) or **global** (`~/.claude/`)
+2. Detect conflicts with existing config and offer to resolve them
+3. Show default protected branches and prompt you to add more
+4. Install hook scripts and slash commands
+5. Merge hook config into settings.json (non-destructive)
+6. Create `.claude/logs/` directory (project-level only)
+7. Print a full report of what was installed
+
+**Global install** (all repos, single config):
+```bash
+bash setup.sh --global
+```
 
 **Preview first** (no changes made):
 ```bash
@@ -73,9 +88,7 @@ Tell your Claude Code agent:
 
 > Clone https://github.com/lucasmccomb/claude-git-flow.git and run `bash setup.sh --check` to preview, then `bash setup.sh` to install. Report back what was changed and any conflicts.
 
-The agent will handle the entire setup, resolve any config conflicts, and give you a summary.
-
-### Option C: Manual Setup
+### Option C: Manual Installation
 
 See [Manual Installation](#manual-installation) below.
 
@@ -83,18 +96,38 @@ See [Manual Installation](#manual-installation) below.
 
 ## After Installation
 
-### Replace placeholder username
-
-```bash
-# Replace <your-github-username> in the protocols file
-sed -i'' -e 's/<your-github-username>/YOUR_GITHUB_USERNAME/g' ~/.claude/github-repo-protocols.md
-```
-
 ### Add CLAUDE.md sections
 
-The setup script installs hooks and commands, but you should also add the git workflow rules to your global `~/.claude/CLAUDE.md`. These are "soft rules" that help the agent understand the *why* behind the workflow.
+The hooks enforce the rules, but adding workflow context to your CLAUDE.md helps agents understand the *why*. Copy this block into your project or global `CLAUDE.md`:
 
-Copy the contents of [`CLAUDE-git-sections.md`](CLAUDE-git-sections.md) into your `~/.claude/CLAUDE.md`.
+```markdown
+# Git Workflow
+
+## Commit Format
+All commits use `#{issue_number}: {description}` format.
+- Example: `#42: Fix login validation`
+- Log/coordination commits use `sync: {description}` (no issue number)
+
+## Branch Workflow
+1. Every piece of work starts with a GitHub issue
+2. Branch from origin/main: `git checkout -b {issue#}-{description} origin/main`
+3. Commit with issue prefix: `git commit -m "#42: description"`
+4. Create PR: `gh pr create --title "#42: description" --body "Closes #42"`
+5. Squash merge, delete branch, return to main
+
+## Protected Branches
+Cannot commit or push directly to: main, master, production, prod,
+staging, stag, develop, dev, release, trunk. Use feature branches + PRs.
+
+## Coordination (multi-developer repos)
+- Read `.claude/logs/` before starting work to check for conflicts
+- Write your session log to `.claude/logs/YYYYMMDD/agent-N.md`
+- Include: issue number, branch, files claimed, decisions, handoff notes
+
+## No AI Attribution
+Never add Co-Authored-By trailers, "Generated with Claude Code", or
+any AI attribution to commits, PRs, or git metadata.
+```
 
 ### Verify it works
 
@@ -108,22 +141,11 @@ This should show your branch, working directory status, and open PRs.
 
 ---
 
-## Available Commands
-
-| Command | Description |
-|---------|-------------|
-| `/gs` | Show git status, current branch, open PRs |
-| `/new-issue` | Create a GitHub issue with proper labels |
-| `/commit` | Stage all changes + commit with `{issue}: {description}` format |
-| `/pr` | Rebase on main + push + create PR that closes the issue |
-| `/cpm` | One-shot: commit + PR + merge + close issue + return to main |
-| `/sync` | Fetch origin + rebase current branch on main |
-
-### Typical Workflow
+## Typical Workflow
 
 ```
 /new-issue                              # Create issue #42
-git checkout -b 42-add-login-page       # Create feature branch
+git checkout -b 42-add-login-page origin/main
 ... make changes ...
 /cpm                                    # Commit, PR, merge, done
 ```
@@ -131,56 +153,10 @@ git checkout -b 42-add-login-page       # Create feature branch
 Or step by step:
 
 ```
-/commit 42: Add login page              # Commit with issue number
-/pr 42: Add login page                  # Push + create PR
+/commit #42: Add login page             # Commit with issue number
+/pr #42: Add login page                 # Push + create PR
 gh pr merge --squash --delete-branch    # Merge
 ```
-
----
-
-## How It Works
-
-The system has four layers, each building on the last:
-
-### Layer 1: CLAUDE.md (soft rules)
-
-Instructions the agent reads and follows voluntarily. Covers conventions like "rebase by default", "check open PRs before branching", "no AI attribution in commits". Useful but not enforced - the agent can still ignore them.
-
-### Layer 2: enforce-git-workflow.py (hard enforcement)
-
-A [`PreToolUse` hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that intercepts every `Bash` command. Blocks:
-
-| Action | Result |
-|--------|--------|
-| `git commit` on any protected branch | **BLOCKED** - must use feature branch |
-| `git commit -m "no issue number"` | **BLOCKED** - must use `{issue}: {desc}` format |
-| `git push` to any protected branch | **BLOCKED** - must use PR workflow |
-
-Protected branches: `main`, `master`, `production`, `prod`, `staging`, `stag`, `develop`, `dev`, `release`, `trunk` (plus any custom branches you add).
-
-Emergency bypass: `ALLOW_MAIN_COMMIT=1 git commit ...`
-
-### Layer 3: enforce-issue-workflow.py (the automation multiplier)
-
-**This is where the real value is.** A `UserPromptSubmit` hook that fires before the agent even starts working. It detects work requests (verbs like "add", "fix", "implement", "build") and injects a workflow reminder directly into the agent's context:
-
-```
-STOP - Before making ANY code or file changes, you MUST:
-1. CHECK: Does a GitHub issue exist for this work?
-2. CREATE BRANCH: git checkout -b {issue-number}-{description}
-3. IMPLEMENT: Make your changes
-4. COMMIT & PR: git commit -m "{issue-number}: {description}"
-```
-
-**Why this matters**: Layers 1 and 2 catch mistakes *after* the agent tries to do something wrong. Layer 3 prevents them from happening in the first place by reshaping the agent's behavior *before it writes a single line of code*. Every work request, no matter how casually phrased ("fix the login bug", "add dark mode"), gets intercepted and turned into a structured workflow. The agent creates the issue, names the branch, implements, and follows through to PR - automatically, every time.
-
-This is what makes the system work across multiple engineers. You don't need to train anyone on the workflow or review their process. The hook does it. Every agent, every session, every task follows the same flow.
-
-Only active when `~/.claude/github-repo-protocols.md` exists. Delete that file to disable.
-
-### Layer 4: Slash commands (automation)
-
-The `/commit`, `/pr`, `/cpm`, `/gs`, `/sync`, and `/new-issue` commands automate the repetitive parts of the workflow so the agent doesn't have to remember the exact commands each time.
 
 ---
 
@@ -190,7 +166,7 @@ When multiple engineers (each with their own Claude agents) work in the same rep
 
 1. **Each issue = one branch = one PR** - no overlap
 2. **Squash merge** keeps main linear
-3. **Pre-branch check** - agents check open PRs before creating branches to avoid dependency blindness
+3. **Coordination logs** in `.claude/logs/` - agents read other sessions before starting
 4. **Rebase by default** - feature branches rebase on main, not merge
 
 ### Recommended repo settings
@@ -211,23 +187,78 @@ gh repo edit owner/repo \
 ```
 claude-git-flow/
   README.md                             # This file
-  setup.sh                              # Automated installer (interactive)
-  CLAUDE-git-sections.md                # Git workflow rules for CLAUDE.md
-  github-repo-protocols.md              # Full lifecycle reference
+  setup.sh                              # Automated installer
+  LICENSE                               # MIT
   hooks/
     enforce-git-workflow.py              # PreToolUse - blocks bad commits/pushes
     enforce-issue-workflow.py            # UserPromptSubmit - injects workflow reminder
   commands/
     commit.md                           # /commit
     pr.md                               # /pr
-    cpm.md                              # /cpm
+    cpm.md                              # /cpm (solo repos)
     gs.md                               # /gs
-    sync.md                             # /sync
     new-issue.md                        # /new-issue
-
-# Created during setup (in ~/.claude/):
-  git-flow-protected-branches.json      # Custom branches beyond the defaults
+  templates/
+    logs/
+      agent.md                          # Session log template
+      learnings.md                      # Shared learnings template
 ```
+
+---
+
+## Protected Branches
+
+The following branches are blocked from direct commits and pushes by default:
+
+| Branch | Common Use |
+|--------|-----------|
+| `main` | Primary branch (GitHub default) |
+| `master` | Primary branch (legacy default) |
+| `production` | Production deployment branch |
+| `prod` | Short form of production |
+| `staging` | Pre-production/QA environment |
+| `stag` | Short form of staging |
+| `develop` | Integration branch (git-flow) |
+| `dev` | Short form of develop |
+| `release` | Release preparation branch |
+| `trunk` | Primary branch (SVN/some teams) |
+
+**Custom branches** can be added during setup or later (see [Customization](#customization)).
+
+---
+
+## Customization
+
+### Add custom protected branches
+
+During `setup.sh`, you'll be prompted to add extra branches. You can also edit the config file directly:
+
+```bash
+# In your .claude/ directory (project or global)
+# git-flow-protected-branches.json
+["qa", "uat", "hotfix", "demo"]
+```
+
+The hook reads this file at runtime and merges it with the built-in defaults. Changes take effect immediately (no reinstall needed).
+
+### Allow direct-to-main for specific repos
+
+Edit the `enforce-git-workflow.py` hook:
+
+```python
+DIRECT_TO_MAIN_REPOS = [
+    "youruser/your-dotfiles",
+]
+```
+
+### Disable the workflow reminder
+
+Remove the `UserPromptSubmit` section from your `settings.json`.
+
+### Commit format
+
+Regular commits: `#42: description` (GitHub auto-links `#42` to the issue)
+Coordination commits: `sync: description` (for log updates, no issue needed)
 
 ---
 
@@ -248,71 +279,24 @@ At the start of setup (if any conflicts are detected), you choose:
 
 | File | Conflict behavior |
 |------|-------------------|
-| `enforce-git-workflow.py` | **Smart merge** - your `DIRECT_TO_MAIN_REPOS` entries are extracted and injected into the new version |
+| `enforce-git-workflow.py` | **Smart merge** - your `DIRECT_TO_MAIN_REPOS` entries are preserved |
 | `enforce-issue-workflow.py` | Interactive review or auto-replace with backup |
 | Slash commands (`.md`) | Interactive review or auto-replace with backup |
-| `github-repo-protocols.md` | Interactive review or auto-replace with backup |
-| `settings.json` | **Always merges** - appends hook entries without touching your existing config |
-| `CLAUDE.md` | **Never modified** - reports which sections are missing for you to add |
+| `settings.json` | **Always merges** - appends hook entries without touching existing config |
+| `CLAUDE.md` | **Never modified** - reports which sections may be missing |
 | Custom protected branches | **Always preserved** - stored in a separate JSON config file |
 
 ### Backups
 
-All original files are backed up to `~/.claude/backups/git-flow-{timestamp}/` before any changes. You can restore them manually if needed.
+All original files are backed up to `.claude/backups/git-flow-{timestamp}/` before any changes. You can restore them manually if needed.
 
 ### Non-interactive mode
 
-For agent-driven installs, use `--non-interactive` to skip all prompts and auto-resolve everything:
+For agent-driven installs:
 
 ```bash
 bash setup.sh --non-interactive
 ```
-
----
-
-## Customization
-
-### Add custom protected branches
-
-During `setup.sh`, you'll be prompted to add extra branches. You can also edit the config file directly:
-
-```bash
-# ~/.claude/git-flow-protected-branches.json
-["qa", "uat", "hotfix", "demo"]
-```
-
-The hook reads this file at runtime and merges it with the built-in defaults. Changes take effect immediately (no reinstall needed).
-
-Alternatively, edit `~/.claude/hooks/enforce-git-workflow.py` and modify the `PROTECTED_BRANCHES` list directly.
-
-### Allow direct-to-main for specific repos
-
-Edit `~/.claude/hooks/enforce-git-workflow.py`:
-
-```python
-DIRECT_TO_MAIN_REPOS = [
-    "youruser/your-dotfiles",
-]
-```
-
-### Disable the workflow reminder
-
-Either:
-- Remove the `UserPromptSubmit` section from `~/.claude/settings.json`
-- Or delete `~/.claude/github-repo-protocols.md`
-
-### Human-agent issues
-
-Update the `--assignee` in `~/.claude/commands/new-issue.md` to your GitHub username.
-
----
-
-## Requirements
-
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- [GitHub CLI (`gh`)](https://cli.github.com/) - authenticated with `gh auth login`
-- `python3`
-- `jq` (for setup script JSON merging) - `brew install jq` / `apt install jq`
 
 ---
 
@@ -323,6 +307,14 @@ If you prefer not to use the setup script:
 ### 1. Copy hook scripts
 
 ```bash
+# Project-level (recommended)
+mkdir -p .claude/hooks
+cp hooks/enforce-git-workflow.py .claude/hooks/
+cp hooks/enforce-issue-workflow.py .claude/hooks/
+chmod +x .claude/hooks/enforce-git-workflow.py
+chmod +x .claude/hooks/enforce-issue-workflow.py
+
+# OR global
 mkdir -p ~/.claude/hooks
 cp hooks/enforce-git-workflow.py ~/.claude/hooks/
 cp hooks/enforce-issue-workflow.py ~/.claude/hooks/
@@ -333,19 +325,25 @@ chmod +x ~/.claude/hooks/enforce-issue-workflow.py
 ### 2. Copy slash commands
 
 ```bash
+# Project-level
+mkdir -p .claude/commands
+cp commands/*.md .claude/commands/
+
+# OR global
 mkdir -p ~/.claude/commands
 cp commands/*.md ~/.claude/commands/
 ```
 
-### 3. Copy protocols file
+### 3. Create logs directory (project-level only)
 
 ```bash
-cp github-repo-protocols.md ~/.claude/github-repo-protocols.md
+mkdir -p .claude/logs
+cp templates/logs/learnings.md .claude/logs/
 ```
 
 ### 4. Add hooks to settings.json
 
-Add to `~/.claude/settings.json` (create if it doesn't exist):
+Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 
 ```json
 {
@@ -355,7 +353,7 @@ Add to `~/.claude/settings.json` (create if it doesn't exist):
         "hooks": [
           {
             "type": "command",
-            "command": "python3 $HOME/.claude/hooks/enforce-issue-workflow.py",
+            "command": "python3 .claude/hooks/enforce-issue-workflow.py",
             "timeout": 5000
           }
         ]
@@ -367,7 +365,7 @@ Add to `~/.claude/settings.json` (create if it doesn't exist):
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/enforce-git-workflow.py",
+            "command": ".claude/hooks/enforce-git-workflow.py",
             "timeout": 5000
           }
         ]
@@ -377,9 +375,20 @@ Add to `~/.claude/settings.json` (create if it doesn't exist):
 }
 ```
 
+For global install, replace `.claude/` paths with `$HOME/.claude/`.
+
 ### 5. Add CLAUDE.md sections
 
-Append the contents of `CLAUDE-git-sections.md` to your `~/.claude/CLAUDE.md`.
+Copy the "Copy to Your CLAUDE.md" block from above into your CLAUDE.md.
+
+---
+
+## Requirements
+
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- [GitHub CLI (`gh`)](https://cli.github.com/) - authenticated with `gh auth login`
+- `python3`
+- `jq` (for setup script JSON merging) - `brew install jq` / `apt install jq`
 
 ---
 

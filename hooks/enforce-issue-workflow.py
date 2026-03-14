@@ -4,20 +4,15 @@ UserPromptSubmit hook to enforce issue-first workflow.
 
 This hook detects work requests and injects a reminder into Claude's context
 to ensure the issue-first workflow is followed before making changes.
+
+Always active - no external files needed. Coordination injection is
+conditional on .claude/logs/ existing in the current working directory.
 """
 
 import json
 import os
 import sys
 import re
-
-
-WORKFLOW_FILE = os.path.expanduser("~/.claude/github-repo-protocols.md")
-
-
-def is_workflow_enabled() -> bool:
-    """Check if the GitHub Issues workflow file is symlinked/present."""
-    return os.path.isfile(WORKFLOW_FILE)
 
 
 def is_work_request(prompt: str) -> bool:
@@ -52,6 +47,64 @@ def is_work_request(prompt: str) -> bool:
     return False
 
 
+def has_logs_directory() -> bool:
+    """Check if .claude/logs/ exists in the current working directory."""
+    return os.path.isdir(os.path.join(os.getcwd(), ".claude", "logs"))
+
+
+def build_reminder() -> str:
+    """Build the workflow reminder, with optional coordination section."""
+    if has_logs_directory():
+        return """
+<workflow-reminder>
+STOP - Before making ANY code or file changes, you MUST:
+
+1. CHECK: Does a GitHub issue exist for this work?
+   - If NO: Create one first with `gh issue create`
+   - If YES: Note the issue number
+
+2. CREATE BRANCH: `git checkout -b {issue#}-{description} origin/main`
+
+3. CHECK COORDINATION: Read `.claude/logs/` for other active sessions
+   - Look for today's date directory: `.claude/logs/YYYYMMDD/`
+   - Read other agents' logs to check for file conflicts
+   - If overlap detected, note it but proceed (advisory, not blocking)
+
+4. LOG YOUR SESSION: Create/update `.claude/logs/YYYYMMDD/agent-N.md`
+
+5. IMPLEMENT: Make your changes
+
+6. COMMIT & PR:
+   - `git commit -m "#{issue_number}: {description}"`
+   - `gh pr create --title "#{issue_number}: ..." --body "Closes #{issue_number}"`
+
+This applies to ALL changes including documentation, config, and "trivial" fixes.
+Do NOT skip this workflow. The user has explicitly requested strict adherence.
+</workflow-reminder>
+"""
+    else:
+        return """
+<workflow-reminder>
+STOP - Before making ANY code or file changes, you MUST:
+
+1. CHECK: Does a GitHub issue exist for this work?
+   - If NO: Create one first with `gh issue create`
+   - If YES: Note the issue number
+
+2. CREATE BRANCH: `git checkout -b {issue#}-{description} origin/main`
+
+3. IMPLEMENT: Make your changes
+
+4. COMMIT & PR:
+   - `git commit -m "#{issue_number}: {description}"`
+   - `gh pr create --title "#{issue_number}: ..." --body "Closes #{issue_number}"`
+
+This applies to ALL changes including documentation, config, and "trivial" fixes.
+Do NOT skip this workflow. The user has explicitly requested strict adherence.
+</workflow-reminder>
+"""
+
+
 def main():
     try:
         input_data = json.load(sys.stdin)
@@ -60,31 +113,8 @@ def main():
 
     prompt = input_data.get("prompt", "")
 
-    if not is_workflow_enabled():
-        sys.exit(0)  # Workflow not enabled, skip reminder
-
     if is_work_request(prompt):
-        reminder = """
-<workflow-reminder>
-STOP - Before making ANY code or file changes, you MUST:
-
-1. CHECK: Does a GitHub issue exist for this work?
-   - If NO: Create one first with `gh issue create`
-   - If YES: Note the issue number
-
-2. CREATE BRANCH: `git checkout -b {issue-number}-{description}`
-
-3. IMPLEMENT: Make your changes
-
-4. COMMIT & PR:
-   - `git commit -m "{issue-number}: {description}"`
-   - `gh pr create --title "{issue-number}: ..." --body "Closes #{issue-number}"`
-
-This applies to ALL changes including documentation, config, and "trivial" fixes.
-Do NOT skip this workflow. The user has explicitly requested strict adherence.
-</workflow-reminder>
-"""
-        print(reminder)
+        print(build_reminder())
 
     sys.exit(0)
 
