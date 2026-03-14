@@ -1,6 +1,8 @@
-# /cpm — Commit, PR, Merge
+# /cpm - Commit, PR, Merge
 
 One-shot workflow: commit all changes, create a PR, merge it, close the issue, and rebase on main.
+
+**For repos where you merge your own PRs.** For team repos with PR review, use `/commit` + `/pr` instead.
 
 ## Usage
 
@@ -26,7 +28,7 @@ If there are no changes and no unpushed commits, stop and report "Nothing to com
 ### Phase 2: Commit
 
 1. Stage all changed files with `git add` (prefer specific files over `git add -A`; never stage `.env` or credential files).
-2. Create a commit with message format: `{issue-number}: {concise description of changes}`
+2. Create a commit with message format: `#{issue-number}: {concise description of changes}`
 3. Do NOT add any Co-Authored-By trailers or AI attribution.
 
 ### Phase 3: Push & Create PR
@@ -34,7 +36,7 @@ If there are no changes and no unpushed commits, stop and report "Nothing to com
 1. Push the branch: `git push -u origin HEAD`
 2. Check for a PR template at `.github/PULL_REQUEST_TEMPLATE.md` or `pull_request_template.md` in the repo root.
 3. Create the PR using `gh pr create`:
-   - Title: `{issue-number}: {concise description}`
+   - Title: `#{issue-number}: {concise description}`
    - Body: Use the PR template if found, otherwise use Summary + Test Plan format
    - Include `Closes #{issue-number}` in the body
 4. Capture the PR URL.
@@ -64,9 +66,9 @@ Output a summary in this format:
 ```
 ## Completed
 
-- **Issue**: #{issue-number} — {issue title}
+- **Issue**: #{issue-number} - {issue title}
 - **PR**: {PR URL} (merged)
-- **Commit**: {short SHA} — {commit message}
+- **Commit**: {short SHA} - {commit message}
 - **Branch**: Deleted `{branch-name}`, now on `main`
 - **Status**: Clean, up to date with origin/main
 ```

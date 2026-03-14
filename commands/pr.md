@@ -1,7 +1,7 @@
 ---
 description: Push branch and create PR that closes an issue
 allowed-tools: Bash(git:*), Bash(gh:*), Bash(npm:*)
-argument-hint: [issue_number]: [description]
+argument-hint: #[issue_number]: [description]
 ---
 
 # Create Pull Request
@@ -46,7 +46,7 @@ argument-hint: [issue_number]: [description]
    - If not found, use a simple body: `Closes #<issue_number>`
 
 6. **Create PR**
-   - Extract issue number from `$ARGUMENTS` (number before the colon)
+   - Extract issue number from `$ARGUMENTS` (number after the `#`)
    - Create PR with:
      ```bash
      gh pr create --title "$ARGUMENTS" --body "<body from template or default>"
@@ -63,7 +63,7 @@ argument-hint: [issue_number]: [description]
 
 ## Expected Format
 
-PR title: `{issue_number}: {brief description}`
-Example: `4: Add user authentication`
+PR title: `#{issue_number}: {brief description}`
+Example: `#4: Add user authentication`
 
 The argument provided is: `$ARGUMENTS`

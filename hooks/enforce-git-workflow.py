@@ -4,12 +4,13 @@ PreToolUse:Bash hook to enforce GitHub Issues workflow.
 
 BLOCKS:
 1. Commits on protected branches (must use feature branch)
-2. Commit messages without issue number prefix (^\d+:)
+2. Commit messages without issue number prefix (^#\d+:)
 3. Direct pushes to protected branches (must use PR workflow)
 
-ESCAPE HATCHES:
-- ALLOW_MAIN_COMMIT=1 env var for emergencies
+ALLOWS:
+- sync: prefix for log/coordination commits (no issue number needed)
 - Merge commits and --amend without -m skip validation
+- ALLOW_MAIN_COMMIT=1 env var for emergencies
 - Not in a git repo → allow all
 """
 
@@ -147,11 +148,18 @@ def is_amend_without_message(command):
     return "--amend" in command and "-m" not in command and "--message" not in command
 
 
+def is_sync_commit(message):
+    """Check if this is a sync/coordination commit (no issue number needed)."""
+    if not message:
+        return False
+    return bool(re.match(r"^sync:", message, re.IGNORECASE))
+
+
 def validate_commit_message_format(message):
-    """Check if commit message starts with issue number: '123: description'."""
+    """Check if commit message starts with issue number: '#42: description'."""
     if not message:
         return True  # No message to validate (e.g., heredoc), skip
-    return bool(re.match(r"^\d+:", message))
+    return bool(re.match(r"^#\d+:", message))
 
 
 def deny(reason):
@@ -183,8 +191,8 @@ def check_commit(command, branch):
             f"Cannot commit on protected branch '{branch}'. "
             "Create a feature branch first:\n"
             "  1. gh issue create  (if no issue exists)\n"
-            "  2. git checkout -b {issue-number}-{description}\n"
-            "  3. Then commit\n\n"
+            "  2. git checkout -b {issue#}-{description} origin/main\n"
+            "  3. Then commit with '#<issue>: description'\n\n"
             "Emergency bypass: ALLOW_MAIN_COMMIT=1 git commit ..."
         )
 
@@ -192,13 +200,14 @@ def check_commit(command, branch):
     if is_merge_commit(command) or is_amend_without_message(command):
         return
 
-    # Rule 2: Commit message must have issue number prefix
+    # Rule 2: Commit message must have issue number prefix (or sync: prefix)
     message = extract_commit_message(command)
-    if message and not validate_commit_message_format(message):
+    if message and not is_sync_commit(message) and not validate_commit_message_format(message):
         deny(
             f'Commit message must start with issue number.\n'
-            f'  Required format: "{{issue_number}}: {{description}}"\n'
-            f'  Example: "123: Fix the login bug"\n'
+            f'  Required format: "#{{issue_number}}: {{description}}"\n'
+            f'  Example: "#42: Fix the login bug"\n'
+            f'  Also allowed: "sync: update session log"\n'
             f'  Your message: "{message}"'
         )
 
